@@ -1,0 +1,7 @@
+.git
+.env
+api/data
+website/dist
+website/node_modules
+website/.vite
+docs

@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+api/datadock-api
+api/coverage.out
+api/tmp/
+website/node_modules/
+website/dist/
+website/.vite/
+*.log
