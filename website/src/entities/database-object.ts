@@ -16,6 +16,7 @@ export type DatabaseObjectKind =
 
 export type DatabaseObject = {
   id: string
+  reference?: string
   connectionId: string
   parentId?: string
   name: string
@@ -25,13 +26,17 @@ export type DatabaseObject = {
   schema?: string
   dataType?: string
   count?: number
+  childrenState?: 'unloaded' | 'loaded' | 'empty' | 'unsupported'
+  capabilities?: string[]
   children?: DatabaseObject[]
 }
 
 export type CatalogTree = {
   connectionId: string
   engine: DatabaseEngine
+  capabilities?: string[]
   databases: DatabaseObject[]
+  nextCursor?: string
   loadedAt: string
 }
 
@@ -39,7 +44,18 @@ export type DataColumn = {
   name: string
   key?: string
   type: string
+  databaseType?: string
+  logicalType?: 'string' | 'boolean' | 'integer' | 'bigint' | 'decimal' | 'float' | 'date' | 'time' | 'datetime' | 'json' | 'binary' | 'uuid' | 'enum' | 'unknown'
   nullable?: boolean
+  defaultValue?: string | null
+  precision?: number
+  scale?: number
+  length?: number
+  enumValues?: string[]
+  identity?: boolean
+  generated?: boolean
+  primaryKey?: boolean
+  valueEncoding?: 'native' | 'decimal-string' | 'json-string' | 'base64' | 'temporal-string'
 }
 
 export type TableRow = Record<string, unknown>
@@ -50,6 +66,15 @@ export type TableRowsInput = {
   search?: string
   sortBy?: string
   sortDirection?: 'asc' | 'desc'
+  columns?: string[]
+  filters?: TableFilter[]
+  includeTotal?: boolean
+}
+
+export type TableFilter = {
+  column: string
+  operator: 'eq' | 'ne' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains' | 'starts_with' | 'ends_with' | 'is_null' | 'is_not_null' | 'in'
+  value?: unknown
 }
 
 export type TableRowsResult = {
@@ -59,16 +84,28 @@ export type TableRowsResult = {
   pageSize: number
   total: number
   durationMs: number
+  primaryKeyColumns?: string[]
+  hasMore?: boolean
+  nextPage?: number
+  truncated?: boolean
 }
 
 export type RowMutation = {
   kind: 'insert' | 'update' | 'delete'
   values?: TableRow
   keys?: TableRow
+  expectedValues?: TableRow
 }
 
 export type TableMutateResult = {
   applied: number
+  status?: 'applied' | 'conflict'
+  atomic?: boolean
+  conflicts?: Array<{
+    index: number
+    kind: RowMutation['kind']
+    reason: 'optimistic_conflict' | 'row_not_found'
+  }>
 }
 
 export type TableColumn = {
@@ -77,6 +114,14 @@ export type TableColumn = {
   nullable: boolean
   defaultValue?: string | null
   comment: string
+  databaseType?: string
+  precision?: number
+  scale?: number
+  length?: number
+  enumValues?: string[]
+  identity?: boolean
+  generated?: boolean
+  primaryKey?: boolean
 }
 
 export type TableIndex = {
@@ -142,8 +187,13 @@ export type DatabaseDashboard = {
   message?: string
   engine: DatabaseEngine
   version?: string
+  connectionId?: string
+  window?: OperationsWindow
+  collectedAt?: string
   metrics: DatabaseMetric[]
 }
+
+export type OperationsWindow = '5m' | '15m' | '1h' | '6h' | '24h'
 
 export type DatabaseSession = {
   id: string
@@ -160,6 +210,9 @@ export type DatabaseSession = {
 export type DatabaseSessions = {
   available: boolean
   message?: string
+  connectionId?: string
+  engine?: DatabaseEngine
+  collectedAt?: string
   items: DatabaseSession[]
 }
 
@@ -177,10 +230,15 @@ export type DatabaseLock = {
 export type DatabaseLocks = {
   available: boolean
   message?: string
+  connectionId?: string
+  engine?: DatabaseEngine
+  collectedAt?: string
   items: DatabaseLock[]
+  blockingChains?: Array<{ waitingSessionId: string; blockingSessionIds: string[] }>
 }
 
 export type SlowQuery = {
+  fingerprint?: string
   query: string
   calls: number
   totalMs: number
@@ -191,5 +249,10 @@ export type SlowQuery = {
 export type DatabasePerformance = {
   available: boolean
   message?: string
+  connectionId?: string
+  engine?: DatabaseEngine
+  window?: OperationsWindow
+  collectedAt?: string
+  metrics?: DatabaseMetric[]
   slowQueries: SlowQuery[]
 }

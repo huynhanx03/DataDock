@@ -6,8 +6,8 @@ function readString(name: keyof ImportMetaEnv, fallback: string) {
 }
 
 function readDataSource(): DataSource {
-  const value = readString('VITE_DATA_SOURCE', import.meta.env.DEV ? 'mock' : 'api')
-  return value === 'api' ? 'api' : 'mock'
+  const value = readString('VITE_DATA_SOURCE', 'api')
+  return value === 'mock' ? 'mock' : 'api'
 }
 
 export const ENV = Object.freeze({

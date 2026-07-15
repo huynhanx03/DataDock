@@ -7,9 +7,10 @@ import (
 	"fmt"
 
 	"github.com/huynhanx03/datadock/internal/core/entity"
+	"github.com/huynhanx03/datadock/internal/ports"
 )
 
-var ErrNotFound = errors.New("record not found")
+var ErrNotFound = ports.ErrNotFound
 
 type WorkspaceRepository struct {
 	database *sql.DB

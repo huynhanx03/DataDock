@@ -4,12 +4,11 @@ WORKDIR /workspace/api
 
 RUN apk add --no-cache git ca-certificates
 
-COPY go-common /go-common
-COPY DataDock/api/go.mod DataDock/api/go.sum ./
+COPY api/go.mod api/go.sum ./
 RUN go mod download
 
-COPY DataDock/api .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/datadock-api ./cmd/server
+COPY api .
+RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -trimpath -ldflags='-s -w' -o /out/datadock-api ./cmd/server
 
 FROM alpine:3.21
 

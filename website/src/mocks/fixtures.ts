@@ -144,7 +144,7 @@ const userRows = generateUsers(128)
 const orderRows = generateOrders(220, userRows)
 
 const userColumns: DataColumn[] = [
-  { name: 'id', type: 'uuid', nullable: false }, { name: 'email', type: 'varchar', nullable: false }, { name: 'full_name', type: 'varchar', nullable: false }, { name: 'role', type: 'user_role', nullable: false }, { name: 'status', type: 'varchar', nullable: false }, { name: 'plan', type: 'varchar', nullable: false }, { name: 'verified', type: 'boolean', nullable: false }, { name: 'mrr', type: 'numeric', nullable: false }, { name: 'created_at', type: 'timestamptz', nullable: false }, { name: 'last_seen_at', type: 'timestamptz', nullable: true },
+  { name: 'id', type: 'uuid', nullable: false }, { name: 'email', type: 'varchar', nullable: false }, { name: 'full_name', type: 'varchar', nullable: false }, { name: 'role', type: 'user_role', nullable: false, enumValues: ['owner', 'admin', 'developer', 'analyst', 'viewer'] }, { name: 'status', type: 'varchar', nullable: false, enumValues: ['active', 'invited', 'suspended'] }, { name: 'plan', type: 'varchar', nullable: false, enumValues: ['Starter', 'Pro', 'Scale', 'Enterprise'] }, { name: 'verified', type: 'boolean', nullable: false }, { name: 'mrr', type: 'numeric', nullable: false }, { name: 'created_at', type: 'timestamptz', nullable: false }, { name: 'last_seen_at', type: 'timestamptz', nullable: true },
 ]
 
 const orderColumns: DataColumn[] = [

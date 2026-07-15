@@ -2,6 +2,7 @@ import { useEffect, useMemo } from 'react'
 import {
   Activity,
   Braces,
+  Cable,
   Database,
   FolderHeart,
   History,
@@ -108,6 +109,10 @@ export function CommandPalette({
           <CommandItem onSelect={() => run(() => onActivitySelect('explorer', APP_ROUTES.home))}>
             <Database />
             Database explorer
+          </CommandItem>
+          <CommandItem onSelect={() => run(() => onActivitySelect('connections', APP_ROUTES.connections))}>
+            <Cable />
+            Connection manager
           </CommandItem>
           <CommandItem onSelect={() => run(() => onActivitySelect('query', APP_ROUTES.query))}>
             <Braces />

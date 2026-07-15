@@ -1,10 +1,10 @@
 import { useState } from 'react'
-import { ChevronDown, Database, RefreshCw, Star } from 'lucide-react'
+import { ChevronDown, ChevronsDown, Database, RefreshCw, Star } from 'lucide-react'
 import type { Connection } from '@/entities/connection'
 import type { CatalogTree, DatabaseObject } from '@/entities/database-object'
-import type { Workspace } from '@/entities/workspace'
+import type { CreateWorkspaceInput, UpdateWorkspaceInput, Workspace } from '@/entities/workspace'
 import { cn } from '@/shared/lib/cn'
-import { IconButton, Skeleton } from '@/shared/ui'
+import { Button, IconButton, Skeleton } from '@/shared/ui'
 import { WorkspaceHeader } from '@/widgets/app-shell/WorkspaceHeader'
 import { ExplorerSearch } from './ExplorerSearch'
 import { ObjectTree } from './ObjectTree'
@@ -18,6 +18,10 @@ type ExplorerPaneProps = {
   catalogLoading?: boolean
   selectedObjectId?: string
   onWorkspaceChange: (workspaceId: string) => void
+  onCreateWorkspace: (input: CreateWorkspaceInput) => Promise<void>
+  onUpdateWorkspace: (workspaceId: string, input: UpdateWorkspaceInput) => Promise<void>
+  onDeleteWorkspace: (workspaceId: string) => Promise<void>
+  onReorderWorkspaces: (ids: string[]) => Promise<void>
   onNewConnection: () => void
   onOpenCommandPalette: () => void
   onConnectionSelect: (connection: Connection) => void
@@ -35,6 +39,10 @@ export function ExplorerPane({
   catalogLoading,
   selectedObjectId,
   onWorkspaceChange,
+  onCreateWorkspace,
+  onUpdateWorkspace,
+  onDeleteWorkspace,
+  onReorderWorkspaces,
   onNewConnection,
   onOpenCommandPalette,
   onConnectionSelect,
@@ -51,9 +59,14 @@ export function ExplorerPane({
         activeWorkspace={activeWorkspace}
         connectionCount={connections.length}
         onWorkspaceChange={onWorkspaceChange}
+        onCreateWorkspace={onCreateWorkspace}
+        onUpdateWorkspace={onUpdateWorkspace}
+        onDeleteWorkspace={onDeleteWorkspace}
+        onReorderWorkspaces={onReorderWorkspaces}
         onNewConnection={onNewConnection}
         onOpenCommandPalette={onOpenCommandPalette}
       />
+      {activeWorkspace?.collapsed ? <div className="grid min-h-0 flex-1 place-items-center px-5 text-center"><div><div className="mx-auto grid size-10 place-items-center rounded-xl border border-border bg-muted/50 text-muted-foreground"><ChevronsDown className="size-4" /></div><p className="mt-3 text-[length:var(--font-size-ui)] font-semibold text-foreground">Explorer collapsed</p><p className="mt-1 text-[length:var(--font-size-meta)] leading-5 text-muted-foreground">Expand this workspace to browse connections and database objects.</p><Button size="xs" variant="outline" className="mt-3" onClick={() => void onUpdateWorkspace(activeWorkspace.id, { name: activeWorkspace.name, icon: activeWorkspace.icon, color: activeWorkspace.color, collapsed: false }).catch(() => undefined)}><ChevronsDown />Expand explorer</Button></div></div> : <>
       <ExplorerSearch value={search} onChange={setSearch} />
       <div className="flex h-[var(--toolbar-height)] shrink-0 items-center gap-2 px-3 text-[length:var(--font-size-meta)] font-semibold tracking-[0.04em] text-muted-foreground uppercase">
         <ChevronDown className="size-3.5" />
@@ -92,7 +105,7 @@ export function ExplorerPane({
                 <Database className="size-5" />
               </div>
               <p className="mt-3 text-[length:var(--font-size-ui)] font-medium text-foreground">No connections yet</p>
-              <p className="mt-1 text-[length:var(--font-size-meta)] leading-5 text-muted-foreground">Create one or open the demo workspace.</p>
+              <p className="mt-1 text-[length:var(--font-size-meta)] leading-5 text-muted-foreground">Create a workspace, then add a database connection.</p>
             </div>
           </div>
         )}
@@ -102,6 +115,7 @@ export function ExplorerPane({
         <span className="truncate">Favorites are pinned first</span>
         <span className="ml-auto size-1.5 rounded-full bg-emerald-400" />
       </div>
+      </>}
     </section>
   )
 }

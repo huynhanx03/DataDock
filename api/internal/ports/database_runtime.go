@@ -22,6 +22,7 @@ type DatabaseRuntime interface {
 	Locks(context.Context, entity.Connection, string) (dto.DatabaseLocks, error)
 	Performance(context.Context, entity.Connection, string) (dto.DatabasePerformance, error)
 	Execute(context.Context, entity.Connection, string, string, int) (dto.QueryResult, error)
+	ExecuteTransaction(context.Context, string, string, int) (dto.QueryResult, error)
 	BeginTransaction(context.Context, entity.Connection, string) (dto.TransactionState, error)
 	TransactionAction(context.Context, string, string, string) (dto.TransactionState, error)
 	CancelSession(context.Context, entity.Connection, string, string, bool) error

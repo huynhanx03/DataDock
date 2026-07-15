@@ -1,96 +1,104 @@
-import { useQuery } from '@tanstack/react-query'
-import { Activity, Clock3, DatabaseZap, Gauge, HardDrive, LockKeyhole, ServerCog, UsersRound } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Activity, AlertTriangle, Clock3, DatabaseZap, Gauge, LockKeyhole, Pause, Play, RefreshCw, ServerCog, TimerReset } from 'lucide-react'
 import type { Connection } from '@/entities/connection'
 import { useDataDockGateway } from '@/app/providers'
-import { Badge, Skeleton } from '@/shared/ui'
+import { LocksPanel } from '@/features/operations/LocksPanel'
+import { OperationsOverview } from '@/features/operations/OperationsOverview'
+import { SessionsPanel } from '@/features/operations/SessionsPanel'
+import { PerformancePanel, SlowQueriesPanel } from '@/features/operations/SlowQueriesPanel'
+import { APP_CONFIG } from '@/shared/config/constants'
+import {
+  Badge,
+  Button,
+  EmptyState,
+  Select,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+  WorkspaceHeader,
+  WorkspacePage,
+  WorkspaceToolbar,
+} from '@/shared/ui'
 
-const metricIcons = [UsersRound, Activity, Gauge, HardDrive]
+type OperationsPageProps = {
+  connection: Connection
+  onOpenQuery?: (sql: string) => void
+}
 
-export function OperationsPage({ connection }: { connection: Connection }) {
+type OperationsArea = 'overview' | 'sessions' | 'locks' | 'slow' | 'performance'
+
+export function OperationsPage({ connection, onOpenQuery }: OperationsPageProps) {
   const gateway = useDataDockGateway()
-  const dashboard = useQuery({ queryKey: ['dashboard', connection.id], queryFn: ({ signal }) => gateway.getDashboard(connection.id, signal) })
-  const sessions = useQuery({ queryKey: ['sessions', connection.id], queryFn: ({ signal }) => gateway.getSessions(connection.id, signal) })
-  const locks = useQuery({ queryKey: ['locks', connection.id], queryFn: ({ signal }) => gateway.getLocks(connection.id, signal) })
-  return (
-    <section className="h-full overflow-y-auto bg-background px-6 py-6 lg:px-8">
-      <header className="flex items-center gap-4">
-        <div className="grid size-11 place-items-center rounded-xl border border-primary/25 bg-accent text-accent-foreground"><DatabaseZap className="size-5" /></div>
-        <div>
-          <p className="text-[length:var(--font-size-meta)] font-semibold tracking-[0.08em] text-primary uppercase">Live operations</p>
-          <h1 className="mt-0.5 text-[1.625rem] font-semibold tracking-[-0.035em]">Database health</h1>
-          <p className="mt-1 text-[length:var(--font-size-ui)] text-muted-foreground">{connection.name} · {dashboard.data?.version ?? connection.engine}</p>
-        </div>
-        <Badge variant="success" className="ml-auto text-[length:var(--font-size-meta)]">All systems operational</Badge>
-      </header>
-      <div className="mt-7 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        {dashboard.isLoading ? Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-32" />) : dashboard.data?.metrics.slice(0, 4).map((metric, index) => {
-          const Icon = metricIcons[index] ?? Gauge
-          return (
-            <article key={metric.key} className="rounded-xl border border-border bg-surface/75 p-4 shadow-control">
-              <div className="flex items-center justify-between">
-                <span className="grid size-9 place-items-center rounded-lg bg-accent text-accent-foreground"><Icon className="size-4" /></span>
-                <Badge variant={metric.trend === 'up' ? 'success' : 'outline'} className="text-[length:var(--font-size-meta)]">{metric.detail ?? 'Live'}</Badge>
-              </div>
-              <p className="mt-5 text-[length:var(--font-size-meta)] font-medium text-muted-foreground">{metric.label}</p>
-              <p className="mt-1 text-2xl font-semibold tracking-[-0.035em]">{metric.value}<span className="ml-1 text-[length:var(--font-size-ui)] font-normal text-muted-foreground">{metric.unit}</span></p>
-            </article>
-          )
-        })}
-      </div>
-      <div className="mt-4 grid gap-4 xl:grid-cols-[1.4fr_0.8fr]">
-        <article className="overflow-hidden rounded-xl border border-border bg-surface/70">
-          <header className="flex h-[var(--toolbar-height)] items-center gap-2 border-b border-border px-4">
-            <ServerCog className="size-4 text-primary" />
-            <h2 className="text-sm font-semibold">Active sessions</h2>
-            <Badge variant="outline" className="ml-auto text-[length:var(--font-size-meta)]">{sessions.data?.items.length ?? 0}</Badge>
-          </header>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] border-collapse text-[length:var(--font-size-data)]">
-              <thead>
-                <tr>{['PID', 'User', 'State', 'Duration', 'Query'].map((label) => <th key={label} className="h-[var(--data-row-height)] border-b border-grid-line bg-grid-header px-3 text-left text-muted-foreground">{label}</th>)}</tr>
-              </thead>
-              <tbody>
-                {sessions.data?.items.map((session) => (
-                  <tr key={session.id} className="hover:bg-accent/35">
-                    <td className="h-[var(--data-row-height)] border-b border-grid-line px-3 font-mono">{session.id}</td>
-                    <td className="border-b border-grid-line px-3">{session.user}</td>
-                    <td className="border-b border-grid-line px-3"><Badge variant={session.state === 'active' ? 'success' : 'outline'} className="text-[length:var(--font-size-meta)]">{session.state}</Badge></td>
-                    <td className="border-b border-grid-line px-3 font-mono text-muted-foreground">{session.durationMs ?? 0} ms</td>
-                    <td className="max-w-96 truncate border-b border-grid-line px-3 font-mono text-muted-foreground">{session.query ?? '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </article>
-        <article className="rounded-xl border border-border bg-surface/70">
-          <header className="flex h-[var(--toolbar-height)] items-center gap-2 border-b border-border px-4">
-            <LockKeyhole className="size-4 text-amber-400" />
-            <h2 className="text-sm font-semibold">Lock activity</h2>
-            <Badge variant={locks.data?.items.length ? 'warning' : 'success'} className="ml-auto text-[length:var(--font-size-meta)]">{locks.data?.items.length ?? 0}</Badge>
-          </header>
-          <div className="space-y-2 p-3">
-            {locks.data?.items.slice(0, 5).map((lock) => (
-              <div key={lock.id} className="rounded-lg border border-border bg-background/45 p-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-[length:var(--font-size-data)] font-medium">{lock.type}</span>
-                  <Badge variant={lock.granted ? 'success' : 'warning'} className="text-[length:var(--font-size-meta)]">{lock.granted ? 'Granted' : 'Waiting'}</Badge>
-                </div>
-                <p className="mt-2 truncate font-mono text-[length:var(--font-size-data)] text-muted-foreground">{lock.object ?? lock.query ?? 'Database lock'}</p>
-              </div>
-            ))}
-            {!locks.data?.items.length ? (
-              <div className="grid min-h-40 place-items-center text-center">
-                <div>
-                  <LockKeyhole className="mx-auto size-5 text-emerald-400" />
-                  <p className="mt-2 text-sm font-medium">No blocking locks</p>
-                  <p className="mt-1 text-[length:var(--font-size-meta)] text-muted-foreground"><Clock3 className="mr-1 inline size-3" />Checked just now</p>
-                </div>
-              </div>
-            ) : null}
-          </div>
-        </article>
-      </div>
-    </section>
-  )
+  const queryClient = useQueryClient()
+  const [pollMs, setPollMs] = useState<number>(APP_CONFIG.operations.dashboardRefreshMs)
+  const [activeArea, setActiveArea] = useState<OperationsArea>('overview')
+  const needsDashboard = activeArea === 'overview'
+  const needsSessions = activeArea === 'overview' || activeArea === 'sessions' || activeArea === 'locks'
+  const needsLocks = activeArea === 'overview' || activeArea === 'locks'
+  const needsPerformance = activeArea === 'slow' || activeArea === 'performance'
+  const dashboard = useQuery({ queryKey: ['dashboard', connection.id], queryFn: ({ signal }) => gateway.getDashboard(connection.id, signal), enabled: needsDashboard, refetchInterval: needsDashboard && pollMs ? pollMs : false })
+  const sessions = useQuery({ queryKey: ['sessions', connection.id], queryFn: ({ signal }) => gateway.getSessions(connection.id, signal), enabled: needsSessions, refetchInterval: needsSessions && pollMs ? pollMs : false })
+  const locks = useQuery({ queryKey: ['locks', connection.id], queryFn: ({ signal }) => gateway.getLocks(connection.id, signal), enabled: needsLocks, refetchInterval: needsLocks && pollMs ? pollMs : false })
+  const performance = useQuery({ queryKey: ['performance', connection.id], queryFn: ({ signal }) => gateway.getPerformance(connection.id, signal), enabled: needsPerformance, refetchInterval: needsPerformance && pollMs ? Math.max(pollMs, 30_000) : false })
+  const sessionAction = useMutation({
+    mutationFn: ({ sessionId, force }: { sessionId: string; force: boolean }) => gateway.cancelSession(connection.id, sessionId, force),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['sessions', connection.id] }),
+        queryClient.invalidateQueries({ queryKey: ['locks', connection.id] }),
+      ])
+    },
+  })
+  const isLive = gateway.source === 'api'
+  const dashboardFeed = { available: dashboard.data?.available, loaded: Boolean(dashboard.data) || dashboard.isError, updatedAt: dashboard.dataUpdatedAt, fetching: dashboard.isFetching, error: dashboard.error, refetch: () => dashboard.refetch() }
+  const sessionsFeed = { available: sessions.data?.available, loaded: Boolean(sessions.data) || sessions.isError, updatedAt: sessions.dataUpdatedAt, fetching: sessions.isFetching, error: sessions.error, refetch: () => sessions.refetch() }
+  const locksFeed = { available: locks.data?.available, loaded: Boolean(locks.data) || locks.isError, updatedAt: locks.dataUpdatedAt, fetching: locks.isFetching, error: locks.error, refetch: () => locks.refetch() }
+  const performanceFeed = { available: performance.data?.available, loaded: Boolean(performance.data) || performance.isError, updatedAt: performance.dataUpdatedAt, fetching: performance.isFetching, error: performance.error, refetch: () => performance.refetch() }
+  const activeFeeds = activeArea === 'overview'
+    ? [dashboardFeed, sessionsFeed, locksFeed]
+    : activeArea === 'sessions'
+      ? [sessionsFeed]
+      : activeArea === 'locks'
+        ? [locksFeed, sessionsFeed]
+        : [performanceFeed]
+  const loadedFeedCount = activeFeeds.filter((feed) => feed.loaded).length
+  const availableFeedCount = activeFeeds.filter((feed) => feed.available).length
+  const allAvailable = activeFeeds.length > 0 && availableFeedCount === activeFeeds.length
+  const refreshedAt = Math.max(0, ...activeFeeds.map((feed) => feed.updatedAt))
+  const refreshing = activeFeeds.some((feed) => feed.fetching)
+  const waitingLocks = locks.data?.items.filter((lock) => !lock.granted).length ?? 0
+  const failedFeeds = activeFeeds.filter((feed) => feed.error)
+  const firstError = activeFeeds.map((feed) => feed.error).find((error): error is Error => error instanceof Error)
+  const sourceLabel = !isLive ? 'Demo data' : loadedFeedCount < activeFeeds.length ? 'Loading live feeds' : allAvailable ? 'Live API' : availableFeedCount ? 'Partially available' : 'Unavailable'
+  const lastUpdated = useMemo(() => refreshedAt ? new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(refreshedAt) : 'Not refreshed', [refreshedAt])
+
+  async function refreshActive() {
+    await Promise.all(activeFeeds.map((feed) => feed.refetch()))
+  }
+
+  return <WorkspacePage>
+    <WorkspaceHeader
+      icon={<DatabaseZap />}
+      eyebrow="Operations"
+      title="Database health"
+      description={`${connection.name} · ${dashboard.data?.version ?? connection.engine}`}
+      meta={<Badge variant={isLive && allAvailable ? 'success' : isLive ? 'warning' : 'accent'}>{sourceLabel}</Badge>}
+      actions={<><div className="hidden items-center gap-1.5 text-[length:var(--font-size-meta)] text-muted-foreground lg:flex"><span className={`size-1.5 rounded-full ${isLive && allAvailable ? 'bg-emerald-400' : 'bg-amber-400'}`} /><span>Updated {lastUpdated}</span></div><Button size="sm" variant="outline" disabled={refreshing} onClick={refreshActive}><RefreshCw className={refreshing ? 'animate-spin' : ''} />Refresh</Button></>}
+    />
+    {failedFeeds.length ? <div role="alert" className="flex shrink-0 flex-wrap items-center gap-3 border-b border-destructive/25 bg-destructive/10 px-5 py-2.5 text-[length:var(--font-size-ui)]"><AlertTriangle className="size-4 text-destructive" /><div className="min-w-0 flex-1"><p className="font-medium text-foreground">{failedFeeds.length === 1 ? 'One operations feed failed to load' : `${failedFeeds.length} operations feeds failed to load`}</p><p className="truncate text-[length:var(--font-size-meta)] text-muted-foreground">{firstError?.message ?? 'The selected adapter did not return telemetry. Loaded panels remain available.'}</p></div><Button size="xs" variant="outline" disabled={refreshing} onClick={refreshActive}><RefreshCw className={refreshing ? 'animate-spin' : ''} />Retry failed feeds</Button></div> : null}
+    <Tabs value={activeArea} onValueChange={(value) => setActiveArea(value as OperationsArea)} className="min-h-0 flex-1 gap-0 overflow-hidden">
+      <WorkspaceToolbar className="overflow-x-auto">
+        <TabsList className="h-auto min-w-max border-0 bg-transparent p-0"><TabsTrigger value="overview"><Gauge />Overview</TabsTrigger><TabsTrigger value="sessions"><ServerCog />Sessions <Badge variant="outline" className="ml-1 px-1.5">{sessions.data?.items.length ?? 0}</Badge></TabsTrigger><TabsTrigger value="locks"><LockKeyhole />Locks {waitingLocks ? <Badge variant="warning" className="ml-1 px-1.5">{waitingLocks}</Badge> : null}</TabsTrigger><TabsTrigger value="slow"><TimerReset />Slow queries</TabsTrigger><TabsTrigger value="performance"><Activity />Performance</TabsTrigger></TabsList>
+        <div className="ml-auto flex shrink-0 items-center gap-2"><Badge variant="outline" className="hidden sm:inline-flex">{isLive ? 'System catalog' : 'Sample telemetry'}</Badge><div className="flex items-center gap-1.5 text-[length:var(--font-size-meta)] text-muted-foreground">{pollMs ? <Play className="size-3.5 text-success-foreground" /> : <Pause className="size-3.5" />}<Select aria-label="Polling interval" className="h-[var(--control-height-sm)] w-32" value={pollMs} onChange={(event) => setPollMs(Number(event.target.value))}><option value={0}>Polling paused</option><option value={5_000}>Every 5s</option><option value={15_000}>Every 15s</option><option value={30_000}>Every 30s</option><option value={60_000}>Every minute</option></Select></div></div>
+      </WorkspaceToolbar>
+      <div className="shrink-0 border-b border-border bg-surface/30 px-5 py-2 text-[length:var(--font-size-meta)] text-muted-foreground"><Clock3 className="mr-1.5 inline size-3.5 text-primary" />{isLive ? 'Metrics are read from the selected database adapter. Availability depends on engine permissions and extensions.' : 'Every value in this workspace is sample data for UI review. No database telemetry is being queried.'}</div>
+      <TabsContent value="overview" className="min-h-0 overflow-auto p-4 lg:p-5">{dashboard.isError && !dashboard.data ? <EmptyState icon={<DatabaseZap />} title="Dashboard feed unavailable" description={dashboard.error.message} actions={<Button variant="outline" onClick={() => dashboard.refetch()}><RefreshCw />Retry dashboard</Button>} /> : <OperationsOverview dashboard={dashboard.data} loading={dashboard.isLoading} sessionsCount={sessions.data?.items.length ?? 0} sessionsAvailable={sessions.data?.available} waitingLocks={waitingLocks} locksAvailable={locks.data?.available} slowQueryCount={performance.data?.slowQueries.length ?? 0} performanceAvailable={performance.data?.available} performanceLoaded={performance.isFetched} source={gateway.source} />}</TabsContent>
+      <TabsContent value="sessions" className="min-h-0 overflow-auto p-4 lg:p-5">{sessions.isError && !sessions.data ? <EmptyState icon={<ServerCog />} title="Session feed unavailable" description={sessions.error.message} actions={<Button variant="outline" onClick={() => sessions.refetch()}><RefreshCw />Retry sessions</Button>} /> : <SessionsPanel sessions={sessions.data} loading={sessions.isLoading} source={gateway.source} onCancel={(sessionId) => sessionAction.mutateAsync({ sessionId, force: false })} onTerminate={(sessionId) => sessionAction.mutateAsync({ sessionId, force: true })} />}</TabsContent>
+      <TabsContent value="locks" className="min-h-0 overflow-auto p-4 lg:p-5">{locks.isError && !locks.data ? <EmptyState icon={<LockKeyhole />} title="Lock feed unavailable" description={locks.error.message} actions={<Button variant="outline" onClick={() => locks.refetch()}><RefreshCw />Retry locks</Button>} /> : <LocksPanel locks={locks.data} sessions={sessions.data?.items} loading={locks.isLoading} source={gateway.source} />}</TabsContent>
+      <TabsContent value="slow" className="min-h-0 overflow-auto p-4 lg:p-5">{performance.isError && !performance.data ? <EmptyState icon={<TimerReset />} title="Performance feed unavailable" description={performance.error.message} actions={<Button variant="outline" onClick={() => performance.refetch()}><RefreshCw />Retry performance</Button>} /> : <SlowQueriesPanel performance={performance.data} loading={performance.isLoading} source={gateway.source} onOpenQuery={onOpenQuery} />}</TabsContent>
+      <TabsContent value="performance" className="min-h-0 overflow-auto p-4 lg:p-5">{performance.isError && !performance.data ? <EmptyState icon={<Activity />} title="Performance feed unavailable" description={performance.error.message} actions={<Button variant="outline" onClick={() => performance.refetch()}><RefreshCw />Retry performance</Button>} /> : <PerformancePanel performance={performance.data} loading={performance.isLoading} source={gateway.source} />}</TabsContent>
+    </Tabs>
+  </WorkspacePage>
 }

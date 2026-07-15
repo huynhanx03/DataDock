@@ -3,8 +3,8 @@ name: datadock
 services:
   api:
     build:
-      context: ..
-      dockerfile: DataDock/api/Dockerfile
+      context: .
+      dockerfile: api/Dockerfile
     env_file:
       - .env
     environment:
@@ -12,35 +12,65 @@ services:
       DATADOCK_HTTP_HOST: 0.0.0.0
       DATADOCK_HTTP_PORT: 8080
       DATADOCK_DATA_PATH: /data/datadock.db
+    expose:
+      - "8080"
+    extra_hosts:
+      - host.docker.internal:host-gateway
     volumes:
       - datadock-data:/data
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
+    stop_grace_period: 20s
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "wget", "-q", "-T", "2", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 10s
       timeout: 3s
-      retries: 10
+      retries: 12
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   web:
     build:
       context: .
       dockerfile: website/Dockerfile
       args:
-        VITE_DATA_SOURCE: ${DATADOCK_WEB_DATA_SOURCE:-mock}
+        VITE_DATA_SOURCE: ${DATADOCK_WEB_DATA_SOURCE:-api}
         VITE_API_BASE_URL: ${DATADOCK_WEB_API_BASE_URL:-}
     depends_on:
       api:
         condition: service_healthy
     ports:
-      - "${DATADOCK_WEB_PORT:-8088}:80"
+      - "${DATADOCK_WEB_BIND_ADDRESS:-127.0.0.1}:${DATADOCK_WEB_PORT:-8088}:80"
+    init: true
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:rw,noexec,nosuid,size=16m
+      - /var/run:rw,noexec,nosuid,size=1m
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
+    stop_grace_period: 10s
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      test: ["CMD", "wget", "-q", "-T", "2", "-O", "/dev/null", "http://127.0.0.1/healthz"]
       interval: 10s
       timeout: 3s
-      retries: 10
+      retries: 12
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
 volumes:
   datadock-data:

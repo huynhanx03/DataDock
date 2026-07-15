@@ -1,4 +1,4 @@
-import type { Connection, ConnectionInput, ConnectionTestResult } from '../entities/connection'
+import type { Connection, ConnectionInput, ConnectionRuntimeStatus, ConnectionTestResult } from '../entities/connection'
 import type {
   CatalogTree,
   CreateIndexInput,
@@ -16,13 +16,21 @@ import type {
 } from '../entities/database-object'
 import type {
   CreateSavedQueryInput,
+  CreateSavedQueryFolderInput,
   ExecuteQueryInput,
+  ExplainQueryInput,
+  PublicSavedQuery,
   QueryHistoryItem,
   QueryResult,
   SavedQuery,
+  SavedQueryFolder,
+  SavedQueryShare,
   TransactionAction,
   TransactionState,
+  UpdateSavedQueryFolderInput,
+  UpdateSavedQueryInput,
 } from '../entities/query'
+import type { SchemaAction, SchemaApplyInput, SchemaApplyResult, SchemaPreview } from '../entities/schema'
 import type { CreateWorkspaceInput, UpdateWorkspaceInput, Workspace } from '../entities/workspace'
 import { APP_CONFIG } from '../shared/config/constants'
 import { GatewayError, type DataDockGateway } from '../data/gateway'
@@ -61,9 +69,22 @@ export class MockDataDockGateway implements DataDockGateway {
   private locks = copy(mockLocks)
   private performance = copy(mockPerformance)
   private history = copy(mockQueryHistory)
-  private savedQueries = copy(mockSavedQueries)
+  private savedQueries: SavedQuery[] = copy(mockSavedQueries).map((item, index) => ({ ...item, favorite: item.favorite ?? index < 2 }))
   private transactions = new Map<string, TransactionState>()
+  private savedQueryFolders: SavedQueryFolder[] = []
   private sequence = 1000
+
+  constructor() {
+    const now = new Date().toISOString()
+    this.savedQueryFolders = [...new Set(this.savedQueries.map((query) => query.folder))].map((name, position) => ({
+      id: `mock-folder-${position + 1}`,
+      name,
+      position,
+      queryCount: this.savedQueries.filter((query) => query.folder === name).length,
+      createdAt: now,
+      updatedAt: now,
+    }))
+  }
 
   private async wait(signal?: AbortSignal, mutation = false) {
     const latency = mutation ? APP_CONFIG.mock.mutationLatencyMs : APP_CONFIG.mock.latencyMs
@@ -221,6 +242,39 @@ export class MockDataDockGateway implements DataDockGateway {
     return { ok: true, latencyMs, message: `Connected to ${connection.name}` }
   }
 
+  async testConnectionDraft(input: ConnectionInput, signal?: AbortSignal): Promise<ConnectionTestResult> {
+    await this.wait(signal)
+    const failed = ['invalid', 'offline', 'unreachable', 'refused'].some((marker) => `${input.host} ${input.proxyUrl} ${input.sshTunnel.host}`.toLowerCase().includes(marker))
+    if (failed) throw new GatewayError(`Could not reach ${input.host}:${input.port}`, 'connection_failed', 502)
+    return { ok: true, latencyMs: input.engine === 'postgresql' ? 18 : 42, message: `Connected to ${input.host}:${input.port}` }
+  }
+
+  async connectConnection(id: string, signal?: AbortSignal): Promise<Connection> {
+    await this.testConnection(id, signal)
+    return copy(this.connection(id))
+  }
+
+  async disconnectConnection(id: string, signal?: AbortSignal): Promise<Connection> {
+    await this.wait(signal, true)
+    const connection = this.connection(id)
+    connection.status = 'disconnected'
+    return copy(connection)
+  }
+
+  async getConnectionStatus(id: string, signal?: AbortSignal): Promise<ConnectionRuntimeStatus> {
+    await this.wait(signal)
+    const connection = this.connection(id)
+    return { status: connection.status, latencyMs: connection.latencyMs, lastConnectedAt: connection.lastConnectedAt }
+  }
+
+  async setConnectionFavorite(id: string, favorite: boolean, signal?: AbortSignal): Promise<Connection> {
+    await this.wait(signal, true)
+    const connection = this.connection(id)
+    connection.favorite = favorite
+    connection.updatedAt = new Date().toISOString()
+    return copy(connection)
+  }
+
   async listCatalog(connectionId: string, signal?: AbortSignal): Promise<CatalogTree> {
     await this.wait(signal)
     this.connection(connectionId)
@@ -266,6 +320,11 @@ export class MockDataDockGateway implements DataDockGateway {
       if (mutation.kind === 'delete' && mutation.keys) table.rows = table.rows.filter((item) => !matchesKeys(item, mutation.keys!))
     })
     return { applied: mutations.length }
+  }
+
+  mutateTableRowsInTransaction(connectionId: string, reference: string, mutations: RowMutation[], transactionId: string, signal?: AbortSignal) {
+    if (!this.transactions.has(transactionId)) return Promise.reject(new GatewayError('Transaction was not found or has expired', 'not_found', 404))
+    return this.mutateTableRows(connectionId, reference, mutations, signal)
   }
 
   async createTable(connectionId: string, input: CreateTableInput, signal?: AbortSignal) {
@@ -336,10 +395,11 @@ export class MockDataDockGateway implements DataDockGateway {
   }
 
   async executeQuery(input: ExecuteQueryInput, signal?: AbortSignal): Promise<QueryResult> {
-    await this.wait(signal, true)
     const startedAt = new Date().toISOString()
     const sql = input.sql.trim()
+    const executionId = input.executionId ?? this.id('execution')
     try {
+      await this.wait(signal, true)
       if (!sql) throw new GatewayError('Query is required', 'validation_error', 400)
       if (/missing_column|syntax_error/i.test(sql)) throw new GatewayError('column "missing_column" does not exist', 'query_error', 400)
       let result: QueryResult
@@ -355,13 +415,26 @@ export class MockDataDockGateway implements DataDockGateway {
           result = { columns: copy(table.columns), rows: copy(table.rows.slice(0, limit)), rowsAffected: 0, durationMs: reference.includes('orders') ? 42 : 18 }
         }
       } else result = { columns: [], rows: [], rowsAffected: 1, durationMs: 12, message: 'Query executed successfully' }
-      this.history.unshift({ id: this.id('history'), connectionId: input.connectionId, sqlText: sql, status: 'success', durationMs: result.durationMs, rowCount: result.rows.length || result.rowsAffected, executedAt: startedAt })
+      result.executionId = executionId
+      this.history.unshift({ id: executionId, connectionId: input.connectionId, sqlText: sql, status: 'success', durationMs: result.durationMs, rowCount: result.rows.length || result.rowsAffected, executedAt: startedAt })
       this.history.splice(APP_CONFIG.query.historyLimit)
       return result
     } catch (error) {
-      this.history.unshift({ id: this.id('history'), connectionId: input.connectionId, sqlText: sql, status: 'error', durationMs: 8, rowCount: 0, error: error instanceof Error ? error.message : 'Query failed', executedAt: startedAt })
+      const abortReason = signal?.aborted ? String(signal.reason ?? '') : ''
+      const cancelled = error instanceof GatewayError && error.code === 'request_aborted' && abortReason !== 'timeout'
+      const message = abortReason === 'timeout' ? 'Query timed out' : error instanceof Error ? error.message : 'Query failed'
+      this.history.unshift({ id: executionId, connectionId: input.connectionId, sqlText: sql, status: cancelled ? 'cancelled' : 'error', durationMs: 8, rowCount: 0, error: cancelled ? undefined : message, executedAt: startedAt })
       throw error
     }
+  }
+
+  explainQuery(input: ExplainQueryInput, signal?: AbortSignal) {
+    const prefix = input.analyze ? 'EXPLAIN ANALYZE ' : 'EXPLAIN '
+    return this.executeQuery({ ...input, sql: `${prefix}${input.sql}` }, signal)
+  }
+
+  async cancelQuery(_executionId: string, signal?: AbortSignal) {
+    await this.wait(signal, true)
   }
 
   async listQueryHistory(connectionId?: string, signal?: AbortSignal): Promise<QueryHistoryItem[]> {
@@ -374,11 +447,24 @@ export class MockDataDockGateway implements DataDockGateway {
     this.history = connectionId ? this.history.filter((item) => item.connectionId !== connectionId) : []
   }
 
+  async deleteQueryHistory(ids: string[], signal?: AbortSignal) {
+    await this.wait(signal, true)
+    const selected = new Set(ids)
+    this.history = this.history.filter((item) => !selected.has(item.id))
+  }
+
   async beginTransaction(connectionId: string, signal?: AbortSignal): Promise<TransactionState> {
     await this.wait(signal, true)
     this.connection(connectionId)
     const transaction: TransactionState = { id: this.id('transaction'), connectionId, state: 'active', startedAt: new Date().toISOString(), savepoints: [] }
     this.transactions.set(transaction.id, transaction)
+    return copy(transaction)
+  }
+
+  async getTransaction(connectionId: string, id: string, signal?: AbortSignal): Promise<TransactionState> {
+    await this.wait(signal)
+    const transaction = this.transactions.get(id)
+    if (!transaction || transaction.connectionId !== connectionId) throw new GatewayError('Transaction was not found or has expired', 'not_found', 404)
     return copy(transaction)
   }
 
@@ -390,8 +476,37 @@ export class MockDataDockGateway implements DataDockGateway {
     if (action === 'rollback') transaction.state = 'rolled-back'
     if (action === 'savepoint' && name && !transaction.savepoints.includes(name)) transaction.savepoints.push(name)
     if (action === 'rollback_to' && name && !transaction.savepoints.includes(name)) throw new GatewayError('Savepoint was not found', 'not_found', 404)
+    if (action === 'release' && name) transaction.savepoints = transaction.savepoints.filter((savepoint) => savepoint !== name)
     if (transaction.state !== 'active') this.transactions.delete(id)
     return copy(transaction)
+  }
+
+  async previewSchema(connectionId: string, actions: SchemaAction[], signal?: AbortSignal): Promise<SchemaPreview> {
+    await this.wait(signal)
+    const connection = this.connection(connectionId)
+    const destructiveKinds = new Set(['drop_table', 'drop_column', 'drop_constraint', 'drop_index', 'alter_column_type'])
+    const steps = actions.map((action, position) => ({
+      position: position + 1,
+      actionId: action.id ?? `mock-schema-${position + 1}`,
+      kind: action.kind,
+      sql: `${action.kind.toUpperCase()} ${action.target.schema ? `${action.target.schema}.` : ''}${action.target.table}`,
+      destructive: destructiveKinds.has(action.kind),
+    }))
+    return {
+      connectionId,
+      engine: connection.engine,
+      actions: copy(actions),
+      steps,
+      sql: steps.map((step) => `${step.sql};`).join('\n'),
+      hash: `mock-${this.id('schema')}`,
+      destructive: steps.some((step) => step.destructive),
+      generatedAt: new Date().toISOString(),
+    }
+  }
+
+  async applySchema(_connectionId: string, input: SchemaApplyInput, signal?: AbortSignal): Promise<SchemaApplyResult> {
+    await this.wait(signal, true)
+    return { previewHash: input.previewHash, appliedSteps: input.actions.length, appliedAt: new Date().toISOString() }
   }
 
   async getDashboard(connectionId: string, signal?: AbortSignal): Promise<DatabaseDashboard> {
@@ -431,11 +546,49 @@ export class MockDataDockGateway implements DataDockGateway {
     return copy([...this.savedQueries].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)))
   }
 
+  async getSavedQuery(id: string, signal?: AbortSignal): Promise<SavedQuery> {
+    await this.wait(signal)
+    const query = this.savedQueries.find((item) => item.id === id)
+    if (!query) throw new GatewayError('Saved query was not found', 'not_found', 404)
+    return copy(query)
+  }
+
   async createSavedQuery(input: CreateSavedQueryInput, signal?: AbortSignal): Promise<SavedQuery> {
     await this.wait(signal, true)
     const now = new Date().toISOString()
-    const query: SavedQuery = { ...input, id: this.id('saved'), folder: input.folder || 'General', shareCode: this.id('share').toUpperCase(), createdAt: now, updatedAt: now }
+    const query: SavedQuery = { ...input, id: this.id('saved'), folder: input.folder || 'General', favorite: false, shareCode: this.id('share').toUpperCase(), createdAt: now, updatedAt: now }
     this.savedQueries.unshift(query)
+    this.ensureFolder(query.folder)
+    return copy(query)
+  }
+
+  async updateSavedQuery(id: string, input: UpdateSavedQueryInput, signal?: AbortSignal): Promise<SavedQuery> {
+    await this.wait(signal, true)
+    const index = this.savedQueries.findIndex((item) => item.id === id)
+    if (index < 0) throw new GatewayError('Saved query was not found', 'not_found', 404)
+    const current = this.savedQueries[index]
+    this.savedQueries[index] = {
+      ...current,
+      ...input,
+      connectionId: input.clearConnection ? undefined : input.connectionId ?? current.connectionId,
+      tags: input.tags ? [...input.tags] : current.tags,
+      updatedAt: new Date().toISOString(),
+    }
+    this.ensureFolder(this.savedQueries[index].folder)
+    return copy(this.savedQueries[index])
+  }
+
+  async duplicateSavedQuery(id: string, signal?: AbortSignal): Promise<SavedQuery> {
+    const source = await this.getSavedQuery(id, signal)
+    return this.createSavedQuery({ connectionId: source.connectionId, folder: source.folder, title: `${source.title} copy`, sql: source.sql, tags: source.tags }, signal)
+  }
+
+  async setSavedQueryFavorite(id: string, favorite: boolean, signal?: AbortSignal): Promise<SavedQuery> {
+    await this.wait(signal, true)
+    const query = this.savedQueries.find((item) => item.id === id)
+    if (!query) throw new GatewayError('Saved query was not found', 'not_found', 404)
+    query.favorite = favorite
+    query.updatedAt = new Date().toISOString()
     return copy(query)
   }
 
@@ -443,6 +596,79 @@ export class MockDataDockGateway implements DataDockGateway {
     await this.wait(signal, true)
     if (!this.savedQueries.some((item) => item.id === id)) throw new GatewayError('Saved query was not found', 'not_found', 404)
     this.savedQueries = this.savedQueries.filter((item) => item.id !== id)
+  }
+
+  async shareSavedQuery(id: string, expiresAt?: string, signal?: AbortSignal): Promise<SavedQueryShare> {
+    await this.wait(signal, true)
+    const query = this.savedQueries.find((item) => item.id === id)
+    if (!query) throw new GatewayError('Saved query was not found', 'not_found', 404)
+    query.shareCode = query.shareCode ?? this.id('share').toUpperCase()
+    return { savedQueryId: id, shareCode: query.shareCode, createdAt: new Date().toISOString(), expiresAt }
+  }
+
+  async getSavedQueryShare(id: string, signal?: AbortSignal): Promise<SavedQueryShare | null> {
+    await this.wait(signal)
+    const query = this.savedQueries.find((item) => item.id === id)
+    if (!query) throw new GatewayError('Saved query was not found', 'not_found', 404)
+    if (!query.shareCode) return null
+    return { savedQueryId: id, shareCode: query.shareCode, createdAt: query.updatedAt }
+  }
+
+  async revokeSavedQueryShare(id: string, signal?: AbortSignal) {
+    await this.wait(signal, true)
+    const query = this.savedQueries.find((item) => item.id === id)
+    if (!query) throw new GatewayError('Saved query was not found', 'not_found', 404)
+    query.shareCode = undefined
+  }
+
+  async getSharedQuery(code: string, signal?: AbortSignal): Promise<PublicSavedQuery> {
+    await this.wait(signal)
+    const query = this.savedQueries.find((item) => item.shareCode === code)
+    if (!query) throw new GatewayError('Shared query was not found', 'not_found', 404)
+    return { title: query.title, sql: query.sql, tags: [...query.tags], createdAt: query.createdAt, sharedAt: query.updatedAt }
+  }
+
+  async listSavedQueryFolders(signal?: AbortSignal): Promise<SavedQueryFolder[]> {
+    await this.wait(signal)
+    return copy(this.savedQueryFolders.map((folder) => ({ ...folder, queryCount: this.savedQueries.filter((query) => query.folder === folder.name).length })).sort((left, right) => left.position - right.position))
+  }
+
+  async createSavedQueryFolder(input: CreateSavedQueryFolderInput, signal?: AbortSignal): Promise<SavedQueryFolder> {
+    await this.wait(signal, true)
+    if (this.savedQueryFolders.some((folder) => folder.name === input.name)) throw new GatewayError('Saved query folder already exists', 'conflict', 409)
+    const now = new Date().toISOString()
+    const folder = { id: this.id('folder'), name: input.name, position: input.position ?? this.savedQueryFolders.length, queryCount: 0, createdAt: now, updatedAt: now }
+    this.savedQueryFolders.push(folder)
+    return copy(folder)
+  }
+
+  async updateSavedQueryFolder(id: string, input: UpdateSavedQueryFolderInput, signal?: AbortSignal): Promise<SavedQueryFolder> {
+    await this.wait(signal, true)
+    const folder = this.savedQueryFolders.find((item) => item.id === id)
+    if (!folder) throw new GatewayError('Saved query folder was not found', 'not_found', 404)
+    const previousName = folder.name
+    if (input.name) folder.name = input.name
+    if (input.position !== undefined) folder.position = input.position
+    folder.updatedAt = new Date().toISOString()
+    if (folder.name !== previousName) this.savedQueries.forEach((query) => { if (query.folder === previousName) query.folder = folder.name })
+    folder.queryCount = this.savedQueries.filter((query) => query.folder === folder.name).length
+    return copy(folder)
+  }
+
+  async deleteSavedQueryFolder(id: string, policy: 'reject' | 'move' = 'reject', destination = '', signal?: AbortSignal) {
+    await this.wait(signal, true)
+    const folder = this.savedQueryFolders.find((item) => item.id === id)
+    if (!folder) throw new GatewayError('Saved query folder was not found', 'not_found', 404)
+    const queries = this.savedQueries.filter((query) => query.folder === folder.name)
+    if (queries.length && policy === 'reject') throw new GatewayError('Saved query folder is not empty', 'conflict', 409)
+    if (queries.length) queries.forEach((query) => { query.folder = destination || 'General' })
+    this.savedQueryFolders = this.savedQueryFolders.filter((item) => item.id !== id)
+  }
+
+  private ensureFolder(name: string) {
+    if (this.savedQueryFolders.some((folder) => folder.name === name)) return
+    const now = new Date().toISOString()
+    this.savedQueryFolders.push({ id: this.id('folder'), name, position: this.savedQueryFolders.length, queryCount: 0, createdAt: now, updatedAt: now })
   }
 }
 

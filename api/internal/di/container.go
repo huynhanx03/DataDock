@@ -3,18 +3,16 @@ package di
 import (
 	"database/sql"
 	"errors"
-	"net/http"
 	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
 
 	"github.com/huynhanx03/datadock/config"
 	"github.com/huynhanx03/datadock/internal/adapters/driven/engines"
 	"github.com/huynhanx03/datadock/internal/adapters/driven/security"
 	"github.com/huynhanx03/datadock/internal/adapters/driven/sqlite"
-	"github.com/huynhanx03/datadock/internal/core/entity"
+	"github.com/huynhanx03/datadock/internal/adapters/driver/httpapi"
 	"github.com/huynhanx03/datadock/internal/core/service"
 	commonlogger "github.com/huynhanx03/go-common/pkg/logger"
 	commonsettings "github.com/huynhanx03/go-common/pkg/settings"
@@ -26,7 +24,13 @@ type Container struct {
 	database     *sql.DB
 	workspaces   *service.WorkspaceService
 	connections  *service.ConnectionService
-	databases    *service.DatabaseService
+	manager      *engines.Manager
+	catalog      *service.CatalogService
+	queries      *service.QueryService
+	tables       *service.TableService
+	transactions *service.TransactionService
+	schema       *service.SchemaService
+	operations   *service.OperationsService
 	savedQueries *service.SavedQueryService
 }
 
@@ -51,103 +55,70 @@ func New(cfg config.Config) (*Container, error) {
 	if cfg.IsProduction() {
 		mode = commonsettings.EnvProd
 	}
-	runtime := engines.NewRuntime()
+	manager := engines.NewManagerWithOptions(engines.ManagerOptions{
+		MaxConcurrentQueries: cfg.MaxConcurrentQueries,
+		TransactionIdleTTL:   cfg.TransactionTTL,
+		ShutdownTimeout:      cfg.ShutdownTimeout,
+	})
+	connectionRepository := sqlite.NewConnectionRepository(database)
+	profileResolver := service.NewConnectionProfileResolver(connectionRepository, cipher)
+	queryHistoryRepository := sqlite.NewQueryHistoryRepository(database)
+	savedQueryRepository := sqlite.NewSavedQueryRepository(database)
+	savedQueryFolderRepository := sqlite.NewSavedQueryFolderRepository(database)
+	sharedQueryRepository := sqlite.NewSharedQueryRepository(database)
 	return &Container{
 		config:   cfg,
 		database: database,
 		logger: commonlogger.NewLogger(commonlogger.LoggerConfig{
 			Mode:    mode,
+			Level:   cfg.LogLevel,
 			Service: "datadock-api",
 			Env:     mode,
 		}),
-		workspaces:   service.NewWorkspaceService(sqlite.NewWorkspaceRepository(database)),
-		connections:  service.NewConnectionService(sqlite.NewConnectionRepository(database), cipher, runtime),
-		databases:    service.NewDatabaseService(sqlite.NewConnectionRepository(database), cipher, runtime),
-		savedQueries: service.NewSavedQueryService(database),
+		workspaces: service.NewWorkspaceService(sqlite.NewWorkspaceRepository(database)),
+		connections: service.NewConnectionServiceWithDefaults(connectionRepository, cipher, manager, service.ConnectionProfileDefaults{
+			MaxOpenConns:    cfg.DefaultPool.MaxOpenConnections,
+			MaxIdleConns:    cfg.DefaultPool.MaxIdleConnections,
+			ConnMaxLifetime: int(cfg.DefaultPool.MaxLifetime / time.Second),
+			ConnMaxIdleTime: int(cfg.DefaultPool.MaxIdleTime / time.Second),
+		}),
+		manager: manager,
+		catalog: service.NewCatalogService(profileResolver, manager, manager),
+		queries: service.NewQueryService(profileResolver, manager, queryHistoryRepository, service.QueryServiceOptions{
+			MaxRows:        cfg.MaxQueryRows,
+			MaxBytes:       cfg.MaxQueryBytes,
+			DefaultTimeout: 30 * time.Second,
+			MaxTimeout:     60 * time.Second,
+			HistoryTimeout: 2 * time.Second,
+		}),
+		tables:       service.NewTableService(profileResolver, manager),
+		transactions: service.NewTransactionService(profileResolver, manager),
+		schema:       service.NewSchemaService(profileResolver, manager),
+		operations:   service.NewOperationsService(profileResolver, manager),
+		savedQueries: service.NewSavedQueryService(savedQueryRepository, savedQueryFolderRepository, sharedQueryRepository),
 	}, nil
 }
 
 func (c *Container) Router() *gin.Engine {
-	if c.config.IsProduction() {
-		gin.SetMode(gin.ReleaseMode)
-	}
-	router := gin.New()
-	router.Use(c.recovery(), c.requestLogger(), c.cors())
-	router.GET("/healthz", c.healthz)
-	api := router.Group("/api/v1")
-	api.GET("/status", c.status)
-	api.GET("/engines", func(ctx *gin.Context) {
-		ctx.JSON(http.StatusOK, gin.H{"data": entity.EngineCapabilities()})
+	return httpapi.NewRouter(httpapi.RouterOptions{
+		Production:   c.config.IsProduction(),
+		CORSOrigins:  c.config.CORSOrigins,
+		MaxBodyBytes: c.config.MaxRequestBytes,
+		Logger:       c.logger.Logger,
+		Metadata:     c.database,
+	}, httpapi.RouterServices{
+		Workspaces:   c.workspaces,
+		Connections:  c.connections,
+		Catalog:      c.catalog,
+		Queries:      c.queries,
+		SavedQueries: c.savedQueries,
+		Tables:       c.tables,
+		Transactions: c.transactions,
+		Schema:       c.schema,
+		Operations:   c.operations,
 	})
-	c.registerWorkspaceRoutes(api)
-	c.registerConnectionRoutes(api)
-	c.registerQueryRoutes(api)
-	return router
 }
 
 func (c *Container) Close() error {
-	databaseError := c.database.Close()
-	loggerError := c.logger.Sync()
-	if databaseError != nil {
-		return databaseError
-	}
-	return loggerError
-}
-
-func (c *Container) healthz(ctx *gin.Context) {
-	ctx.JSON(http.StatusOK, gin.H{"status": "ok"})
-}
-
-func (c *Container) status(ctx *gin.Context) {
-	ctx.JSON(http.StatusOK, gin.H{"data": gin.H{"service": "datadock-api", "version": "v1"}})
-}
-
-func (c *Container) recovery() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				c.logger.Error("request panic", zap.Any("panic", recovered), zap.String("path", ctx.Request.URL.Path))
-				ctx.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": gin.H{"code": "internal_error", "message": "An unexpected error occurred"}})
-			}
-		}()
-		ctx.Next()
-	}
-}
-
-func (c *Container) requestLogger() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		started := time.Now()
-		ctx.Next()
-		c.logger.Info("http request",
-			zap.String("method", ctx.Request.Method),
-			zap.String("path", ctx.Request.URL.Path),
-			zap.Int("status", ctx.Writer.Status()),
-			zap.Duration("duration", time.Since(started)),
-		)
-	}
-}
-
-func (c *Container) cors() gin.HandlerFunc {
-	allowedOrigins := make(map[string]struct{}, len(c.config.CORSOrigins))
-	for _, origin := range c.config.CORSOrigins {
-		allowedOrigins[origin] = struct{}{}
-	}
-	return func(ctx *gin.Context) {
-		origin := ctx.GetHeader("Origin")
-		if _, ok := allowedOrigins[origin]; ok {
-			ctx.Header("Access-Control-Allow-Origin", origin)
-			ctx.Header("Vary", "Origin")
-			ctx.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			ctx.Header("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
-		}
-		if ctx.Request.Method == http.MethodOptions {
-			if _, ok := allowedOrigins[origin]; !ok && origin != "" {
-				ctx.AbortWithStatus(http.StatusForbidden)
-				return
-			}
-			ctx.AbortWithStatus(http.StatusNoContent)
-			return
-		}
-		ctx.Next()
-	}
+	return errors.Join(c.manager.Close(), c.database.Close(), c.logger.Sync())
 }

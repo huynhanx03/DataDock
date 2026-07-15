@@ -15,25 +15,33 @@ import (
 )
 
 func main() {
-	cfg, err := config.Load()
-	if err != nil {
+	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+func run() (result error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
 	}
 	container, err := di.New(cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return err
 	}
-	defer container.Close()
+	defer func() {
+		result = errors.Join(result, container.Close())
+	}()
 
 	server := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.HTTPHost, cfg.HTTPPort),
 		Handler:           container.Router(),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      75 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    64 * 1024,
 	}
 
 	errorsChannel := make(chan error, 1)
@@ -41,24 +49,24 @@ func main() {
 		errorsChannel <- server.ListenAndServe()
 	}()
 
+	signalContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	select {
-	case err := <-errorsChannel:
-		if !errors.Is(err, http.ErrServerClosed) {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+	case serveErr := <-errorsChannel:
+		if !errors.Is(serveErr, http.ErrServerClosed) {
+			return serveErr
 		}
-	case <-shutdownSignal():
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		return nil
+	case <-signalContext.Done():
+		shutdownContext, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 		defer cancel()
-		if err := server.Shutdown(ctx); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+		if err := server.Shutdown(shutdownContext); err != nil {
+			return errors.Join(err, server.Close())
 		}
+		serveErr := <-errorsChannel
+		if !errors.Is(serveErr, http.ErrServerClosed) {
+			return serveErr
+		}
+		return nil
 	}
-}
-
-func shutdownSignal() <-chan os.Signal {
-	channel := make(chan os.Signal, 1)
-	signal.Notify(channel, syscall.SIGINT, syscall.SIGTERM)
-	return channel
 }

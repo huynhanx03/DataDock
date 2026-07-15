@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/huynhanx03/datadock/internal/adapters/driven/engines"
 	"github.com/huynhanx03/datadock/internal/core/dto"
 	"github.com/huynhanx03/datadock/internal/core/entity"
 	"github.com/huynhanx03/datadock/internal/ports"
@@ -243,10 +242,7 @@ func (service *DatabaseService) Execute(ctx context.Context, input dto.ExecuteQu
 		return dto.QueryResult{}, ErrReadOnlyConnection
 	}
 	if input.TransactionID != "" {
-		if runtime, ok := service.runtime.(*engines.Runtime); ok {
-			return runtime.ExecuteTransaction(ctx, input.TransactionID, input.SQL, input.TimeoutSeconds)
-		}
-		return dto.QueryResult{}, errors.New("transaction runtime is unavailable")
+		return service.runtime.ExecuteTransaction(ctx, input.TransactionID, input.SQL, input.TimeoutSeconds)
 	}
 	return service.runtime.Execute(ctx, connection, password, input.SQL, input.TimeoutSeconds)
 }

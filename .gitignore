@@ -9,3 +9,4 @@ website/node_modules/
 website/dist/
 website/.vite/
 *.log
+.superpowers/

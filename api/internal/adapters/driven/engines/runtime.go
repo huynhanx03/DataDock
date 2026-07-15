@@ -1,30 +1,17 @@
 package engines
 
 import (
-	"bufio"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
-	"net/url"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
-	"github.com/lib/pq"
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
-	"golang.org/x/net/proxy"
 
 	"github.com/huynhanx03/datadock/internal/core/dto"
 	"github.com/huynhanx03/datadock/internal/core/entity"
@@ -41,19 +28,6 @@ type transactionHandle struct {
 type Runtime struct {
 	transactions  map[string]*transactionHandle
 	transactionMu sync.Mutex
-}
-type transport struct {
-	dial      func(context.Context, string, string) (net.Conn, error)
-	sshClient *ssh.Client
-}
-
-type bufferedConn struct {
-	net.Conn
-	reader *bufio.Reader
-}
-
-func (connection *bufferedConn) Read(buffer []byte) (int, error) {
-	return connection.reader.Read(buffer)
 }
 
 func NewRuntime() *Runtime {
@@ -191,245 +165,10 @@ func (runtime *Runtime) open(connection entity.Connection, password string) (*sq
 	if connection.ConnMaxLifetime > 0 {
 		database.SetConnMaxLifetime(time.Duration(connection.ConnMaxLifetime) * time.Second)
 	}
+	if connection.ConnMaxIdleTime > 0 {
+		database.SetConnMaxIdleTime(time.Duration(connection.ConnMaxIdleTime) * time.Second)
+	}
 	return database, transport.Close, nil
-}
-
-func openDatabase(connection entity.Connection, password string, transport *transport) (*sql.DB, error) {
-	if !connection.Engine.Valid() {
-		return nil, errors.New("database engine is not supported")
-	}
-	if connection.Engine == entity.EnginePostgreSQL {
-		configuration := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", connection.Host, connection.Port, connection.Username, password, connection.Database, postgresSSLMode(connection.SSLMode))
-		if connection.SSLCAPath != "" {
-			configuration += " sslrootcert=" + connection.SSLCAPath
-		}
-		if connection.SSLCertPath != "" {
-			configuration += " sslcert=" + connection.SSLCertPath + " sslkey=" + connection.SSLKeyPath
-		}
-		connector, err := pq.NewConnector(configuration)
-		if err != nil {
-			return nil, err
-		}
-		connector.Dialer(transport)
-		return sql.OpenDB(connector), nil
-	}
-	configuration := mysql.NewConfig()
-	configuration.User = connection.Username
-	configuration.Passwd = password
-	configuration.Net = "tcp"
-	configuration.Addr = net.JoinHostPort(connection.Host, strconv.Itoa(connection.Port))
-	configuration.DBName = connection.Database
-	configuration.ParseTime = true
-	configuration.DialFunc = transport.dial
-	if connection.SSLMode != entity.SSLModeDisable {
-		name, err := registerMySQLTLS(connection)
-		if err != nil {
-			return nil, err
-		}
-		configuration.TLSConfig = name
-	}
-	connector, err := mysql.NewConnector(configuration)
-	if err != nil {
-		return nil, err
-	}
-	return sql.OpenDB(connector), nil
-}
-
-func newTransport(connection entity.Connection) (*transport, error) {
-	dial := (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
-	if connection.ProxyURL != "" {
-		proxyDial, err := proxyDialer(connection.ProxyURL)
-		if err != nil {
-			return nil, err
-		}
-		dial = proxyDial
-	}
-	result := &transport{dial: dial}
-	if !connection.SSHTunnel.Enabled {
-		return result, nil
-	}
-	hostKeyCallback, err := knownhosts.New(connection.SSHTunnel.KnownHostsPath)
-	if err != nil {
-		return nil, err
-	}
-	auth, err := sshAuthMethods(connection.SSHTunnel)
-	if err != nil {
-		return nil, err
-	}
-	sshAddress := net.JoinHostPort(connection.SSHTunnel.Host, strconv.Itoa(connection.SSHTunnel.Port))
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-	defer cancel()
-	connectionToSSH, err := dial(ctx, "tcp", sshAddress)
-	if err != nil {
-		return nil, err
-	}
-	_ = connectionToSSH.SetDeadline(time.Now().Add(12 * time.Second))
-	clientConnection, channels, requests, err := ssh.NewClientConn(connectionToSSH, sshAddress, &ssh.ClientConfig{User: connection.SSHTunnel.Username, Auth: auth, HostKeyCallback: hostKeyCallback, Timeout: 12 * time.Second})
-	if err != nil {
-		connectionToSSH.Close()
-		return nil, err
-	}
-	_ = connectionToSSH.SetDeadline(time.Time{})
-	result.sshClient = ssh.NewClient(clientConnection, channels, requests)
-	result.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		return result.sshClient.Dial(network, address)
-	}
-	return result, nil
-}
-
-func (transport *transport) Dial(network, address string) (net.Conn, error) {
-	return transport.dial(context.Background(), network, address)
-}
-
-func (transport *transport) DialTimeout(network, address string, timeout time.Duration) (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return transport.dial(ctx, network, address)
-}
-
-func (transport *transport) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	return transport.dial(ctx, network, address)
-}
-
-func (transport *transport) Close() {
-	if transport != nil && transport.sshClient != nil {
-		_ = transport.sshClient.Close()
-	}
-}
-
-func sshAuthMethods(tunnel entity.SSHTunnel) ([]ssh.AuthMethod, error) {
-	methods := make([]ssh.AuthMethod, 0, 2)
-	if tunnel.Password != "" {
-		methods = append(methods, ssh.Password(tunnel.Password))
-	}
-	if tunnel.PrivateKeyPath != "" {
-		privateKey, err := os.ReadFile(tunnel.PrivateKeyPath)
-		if err != nil {
-			return nil, err
-		}
-		signer, err := ssh.ParsePrivateKey(privateKey)
-		if err != nil {
-			return nil, err
-		}
-		methods = append(methods, ssh.PublicKeys(signer))
-	}
-	if len(methods) == 0 {
-		return nil, errors.New("SSH tunnel requires a password or private key")
-	}
-	return methods, nil
-}
-
-func proxyDialer(rawURL string) (func(context.Context, string, string) (net.Conn, error), error) {
-	proxyURL, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, err
-	}
-	proxyAddress := proxyURL.Host
-	if _, _, err := net.SplitHostPort(proxyAddress); err != nil {
-		defaultPort := "80"
-		if proxyURL.Scheme == "https" {
-			defaultPort = "443"
-		}
-		proxyAddress = net.JoinHostPort(proxyURL.Hostname(), defaultPort)
-	}
-	if proxyURL.Scheme == "socks5" || proxyURL.Scheme == "socks5h" {
-		dialer, err := proxy.FromURL(proxyURL, &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second})
-		if err != nil {
-			return nil, err
-		}
-		return func(ctx context.Context, network, address string) (net.Conn, error) {
-			if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
-				return contextDialer.DialContext(ctx, network, address)
-			}
-			return dialer.Dial(network, address)
-		}, nil
-	}
-	if proxyURL.Scheme != "http" && proxyURL.Scheme != "https" {
-		return nil, errors.New("unsupported proxy protocol")
-	}
-	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-		connection, err := dialer.DialContext(ctx, "tcp", proxyAddress)
-		if err != nil {
-			return nil, err
-		}
-		if proxyURL.Scheme == "https" {
-			serverName := proxyURL.Hostname()
-			secureConnection := tls.Client(connection, &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName})
-			if err := secureConnection.HandshakeContext(ctx); err != nil {
-				connection.Close()
-				return nil, err
-			}
-			connection = secureConnection
-		}
-		request := &http.Request{Method: http.MethodConnect, URL: &url.URL{Opaque: address}, Host: address, Header: make(http.Header)}
-		if proxyURL.User != nil {
-			password, _ := proxyURL.User.Password()
-			request.SetBasicAuth(proxyURL.User.Username(), password)
-		}
-		if err := request.Write(connection); err != nil {
-			connection.Close()
-			return nil, err
-		}
-		reader := bufio.NewReader(connection)
-		response, err := http.ReadResponse(reader, request)
-		if err != nil {
-			connection.Close()
-			return nil, err
-		}
-		if response.StatusCode != http.StatusOK {
-			response.Body.Close()
-			connection.Close()
-			return nil, fmt.Errorf("proxy CONNECT failed: %s", response.Status)
-		}
-		response.Body.Close()
-		return &bufferedConn{Conn: connection, reader: reader}, nil
-	}, nil
-}
-
-func postgresSSLMode(mode entity.SSLMode) string {
-	switch mode {
-	case entity.SSLModeRequire:
-		return "require"
-	case entity.SSLModeVerifyCA:
-		return "verify-ca"
-	case entity.SSLModeVerifyFull:
-		return "verify-full"
-	default:
-		return "disable"
-	}
-}
-
-func registerMySQLTLS(connection entity.Connection) (string, error) {
-	roots, err := x509.SystemCertPool()
-	if err != nil || roots == nil {
-		roots = x509.NewCertPool()
-	}
-	if connection.SSLCAPath != "" {
-		pem, err := os.ReadFile(connection.SSLCAPath)
-		if err != nil {
-			return "", err
-		}
-		if !roots.AppendCertsFromPEM(pem) {
-			return "", errors.New("SSL CA certificate contains no valid certificate")
-		}
-	}
-	configuration := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: connection.Host}
-	if connection.SSLCertPath != "" {
-		certificate, err := tls.LoadX509KeyPair(connection.SSLCertPath, connection.SSLKeyPath)
-		if err != nil {
-			return "", err
-		}
-		configuration.Certificates = []tls.Certificate{certificate}
-	}
-	name := "datadock-" + uuid.NewString()
-	if err := mysql.RegisterTLSConfig(name, configuration); err != nil {
-		return "", err
-	}
-	return name, nil
 }
 
 func (runtime *Runtime) ListTables(ctx context.Context, connection entity.Connection, password string) ([]string, error) {
@@ -517,7 +256,11 @@ func (runtime *Runtime) BrowseTable(ctx context.Context, connection entity.Conne
 		return dto.TableRowsResult{}, err
 	}
 	defer rows.Close()
-	result := dto.TableRowsResult{Columns: columns, Rows: make([][]any, 0), Total: total, Limit: input.Limit, Offset: input.Offset}
+	descriptors := make([]dto.DataColumn, len(columns))
+	for index, column := range columns {
+		descriptors[index] = dto.DataColumn{Key: column, Name: column, Type: string(dto.LogicalTypeUnknown), LogicalType: dto.LogicalTypeUnknown, ValueEncoding: dto.ValueEncodingNative}
+	}
+	result := dto.TableRowsResult{Columns: descriptors, Rows: make([][]any, 0), Total: &total, Limit: input.Limit, Offset: input.Offset}
 	for rows.Next() {
 		values := make([]any, len(columns))
 		references := make([]any, len(columns))
