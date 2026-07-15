@@ -2,6 +2,7 @@ import {
   Activity,
   Blocks,
   Braces,
+  Cable,
   Clock3,
   Command,
   Database,
@@ -22,6 +23,7 @@ import type { ActivityId, ActivityItem } from './shell-types'
 
 const PRIMARY_ACTIVITIES: ActivityItem[] = [
   { id: 'explorer', label: 'Database explorer', icon: Blocks, route: APP_ROUTES.home },
+  { id: 'connections', label: 'Connection manager', icon: Cable, route: APP_ROUTES.connections },
   { id: 'query', label: 'SQL workspace', icon: Braces, route: APP_ROUTES.query },
   { id: 'history', label: 'Query history', icon: Clock3, route: APP_ROUTES.history },
   { id: 'saved', label: 'Saved queries', icon: FolderHeart, route: APP_ROUTES.savedQueries },

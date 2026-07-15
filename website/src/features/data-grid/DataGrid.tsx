@@ -30,11 +30,13 @@ import {
   type VisibilityState,
 } from '@tanstack/react-table'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { ChevronDown, ChevronsUpDown, Columns3, Filter, GripVertical, RefreshCw, Search, SlidersHorizontal } from 'lucide-react'
+import { CheckSquare2, ChevronDown, ChevronsUpDown, Columns3, Filter, GripVertical, MinusSquare, RefreshCw, Search, SlidersHorizontal, Square } from 'lucide-react'
 import type { DataColumn, TableRow } from '@/entities/database-object'
+import { dataRowIdentity } from '@/features/data-editor/useStagedMutations'
+import { TypedCellEditor } from '@/features/data-editor/TypedCellEditor'
 import { APP_CONFIG } from '@/shared/config/constants'
 import { cn } from '@/shared/lib/cn'
-import { Badge, Button, IconButton, Input, Skeleton } from '@/shared/ui'
+import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, IconButton, Input, PropertyField, Select, Skeleton } from '@/shared/ui'
 import { ColumnManager } from '@/features/data-grid/ColumnManager'
 
 const ROW_NUMBER_COLUMN_ID = '__datadock_row_number__'
@@ -64,6 +66,15 @@ type DataGridProps = {
   onSort: (column: string) => void
   onRefresh: () => void
   onRetry: () => void
+  editing?: boolean
+  pendingCells?: Map<string, unknown>
+  insertedRowIds?: Set<string>
+  deletedRowIds?: Set<string>
+  validationErrors?: Map<string, string>
+  selectedRowIds?: Set<string>
+  keyColumns?: string[]
+  onSelectedRowIdsChange?: (ids: Set<string>) => void
+  onEditCell?: (row: TableRow, column: string, value: unknown) => void
 }
 
 function resolveUpdater<T>(updater: Updater<T>, previous: T) {
@@ -221,8 +232,25 @@ export function DataGrid({
   onSort,
   onRefresh,
   onRetry,
+  editing = false,
+  pendingCells,
+  insertedRowIds = new Set(),
+  deletedRowIds = new Set(),
+  validationErrors = new Map(),
+  selectedRowIds = new Set(),
+  keyColumns = ['id'],
+  onSelectedRowIdsChange,
+  onEditCell,
 }: DataGridProps) {
   const [columnManagerOpen, setColumnManagerOpen] = useState(false)
+  const [filterOpen, setFilterOpen] = useState(false)
+  const [sortOpen, setSortOpen] = useState(false)
+  const [filterColumn, setFilterColumn] = useState('')
+  const [filterValue, setFilterValue] = useState('')
+  const [draftFilterColumn, setDraftFilterColumn] = useState('')
+  const [draftFilterValue, setDraftFilterValue] = useState('')
+  const [draftSortColumn, setDraftSortColumn] = useState(sortBy ?? '')
+  const [editingCell, setEditingCell] = useState<{ rowId: string; column: string; value: unknown }>()
   const scrollRef = useRef<HTMLDivElement>(null)
   const columnIds = useMemo(() => columns.map((column) => column.key ?? column.name), [columns])
   const columnSignature = columnIds.join('\u0000')
@@ -230,6 +258,15 @@ export function DataGrid({
   const [preferences, setPreferences] = useState<GridPreferences>(() => loadPreferences(storageKey, columnIds))
   const preferencesReady = useRef(columnIds.length > 0)
   const definitionById = useMemo(() => new Map(columns.map((column) => [column.key ?? column.name, column])), [columns])
+  const displayedRows = useMemo(() => {
+    if (!filterColumn || !filterValue.trim()) return rows
+    const needle = filterValue.trim().toLowerCase()
+    return rows.filter((row) => String(row[filterColumn] ?? '').toLowerCase().includes(needle))
+  }, [filterColumn, filterValue, rows])
+
+  useEffect(() => {
+    if (filterColumn || filterValue) onSelectedRowIdsChange?.(new Set())
+  }, [filterColumn, filterValue, onSelectedRowIdsChange])
 
   useEffect(() => {
     if (!columnIds.length) return
@@ -261,9 +298,9 @@ export function DataGrid({
       id: ROW_NUMBER_COLUMN_ID,
       header: '#',
       cell: ({ row }) => (page - 1) * pageSize + row.index + 1,
-      size: APP_CONFIG.table.rowNumberWidth,
-      minSize: APP_CONFIG.table.rowNumberWidth,
-      maxSize: APP_CONFIG.table.rowNumberWidth,
+      size: editing ? 78 : APP_CONFIG.table.rowNumberWidth,
+      minSize: editing ? 78 : APP_CONFIG.table.rowNumberWidth,
+      maxSize: editing ? 78 : APP_CONFIG.table.rowNumberWidth,
       enableHiding: false,
       enablePinning: false,
       enableResizing: false,
@@ -277,10 +314,10 @@ export function DataGrid({
       minSize: APP_CONFIG.table.minColumnWidth,
       maxSize: APP_CONFIG.table.maxColumnWidth,
     })),
-  ], [columns, page, pageSize])
+  ], [columns, editing, page, pageSize])
 
   const table = useReactTable({
-    data: rows,
+    data: displayedRows,
     columns: columnDefinitions,
     state: preferences,
     onColumnOrderChange: (updater) => updatePreference('columnOrder', updater),
@@ -288,12 +325,16 @@ export function DataGrid({
     onColumnSizingChange: (updater) => updatePreference('columnSizing', updater),
     onColumnPinningChange: (updater) => updatePreference('columnPinning', updater),
     getCoreRowModel: getCoreRowModel(),
-    getRowId: (row, index) => String(row.id ?? `${page}:${index}`),
+    getRowId: (row, index) => dataRowIdentity(row, keyColumns, index),
     columnResizeMode: 'onChange',
     enableColumnResizing: true,
   })
 
   const rowModel = table.getRowModel().rows
+  const allRowIds = rowModel.map((row) => dataRowIdentity(row.original, keyColumns, row.index))
+  const selectedVisibleCount = allRowIds.filter((id) => selectedRowIds.has(id)).length
+  const allVisibleSelected = Boolean(allRowIds.length) && selectedVisibleCount === allRowIds.length
+  const someVisibleSelected = selectedVisibleCount > 0 && !allVisibleSelected
   const virtualizer = useVirtualizer({
     count: rowModel.length,
     getScrollElement: () => scrollRef.current,
@@ -393,11 +434,27 @@ export function DataGrid({
     setPreferences(createDefaultPreferences(columnIds))
   }
 
+  function toggleRowSelection(rowId: string) {
+    if (!onSelectedRowIdsChange) return
+    const next = new Set(selectedRowIds)
+    if (next.has(rowId)) next.delete(rowId)
+    else next.add(rowId)
+    onSelectedRowIdsChange(next)
+  }
+
+  function toggleVisibleRows() {
+    if (!onSelectedRowIdsChange) return
+    const next = new Set(selectedRowIds)
+    if (allVisibleSelected) allRowIds.forEach((id) => next.delete(id))
+    else allRowIds.forEach((id) => next.add(id))
+    onSelectedRowIdsChange(next)
+  }
+
   function renderHeaderCell(column: Column<TableRow, unknown>) {
     const header = headers.get(column.id)
     if (!header) return null
     if (column.id === ROW_NUMBER_COLUMN_ID) {
-      return <div key={column.id} role="columnheader" aria-colindex={visibleColumnIndex.get(column.id)} style={{ ...pinnedStyle(column, lastLeftId, firstRightId), zIndex: 22 }} className="flex items-center justify-end border-r border-grid-line bg-grid-header/95 px-3 font-mono text-[length:var(--font-size-meta)] text-muted-foreground">{flexRender(header.column.columnDef.header, header.getContext())}</div>
+      return <div key={column.id} role="columnheader" aria-colindex={visibleColumnIndex.get(column.id)} style={{ ...pinnedStyle(column, lastLeftId, firstRightId), zIndex: 22 }} className="flex items-center justify-end gap-2 border-r border-grid-line bg-grid-header/95 px-3 font-mono text-[length:var(--font-size-meta)] text-muted-foreground">{editing ? <button type="button" role="checkbox" aria-checked={someVisibleSelected ? 'mixed' : allVisibleSelected} aria-label={allVisibleSelected ? 'Clear visible row selection' : 'Select all visible rows'} className="grid size-5 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" onClick={toggleVisibleRows}>{someVisibleSelected ? <MinusSquare className="size-3.5" /> : allVisibleSelected ? <CheckSquare2 className="size-3.5 text-primary" /> : <Square className="size-3.5" />}</button> : null}{flexRender(header.column.columnDef.header, header.getContext())}</div>
     }
     const definition = definitionById.get(column.id)
     return definition ? <SortableHeaderCell key={column.id} header={header} definition={definition} sortBy={sortBy} sortDirection={sortDirection} lastLeftId={lastLeftId} firstRightId={firstRightId} columnIndex={visibleColumnIndex.get(column.id) ?? 1} onSort={onSort} onAutoSize={autoSizeColumn} onResizeBy={resizeColumnBy} /> : null
@@ -410,9 +467,10 @@ export function DataGrid({
           <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input value={search} onChange={(event) => onSearchChange(event.target.value)} className="pl-9" placeholder={searchPlaceholder} />
         </div>
-        <Button variant="outline" size="sm"><Filter />Filter</Button>
-        <Button variant="outline" size="sm"><SlidersHorizontal />Sort</Button>
+        <Button variant={filterColumn && filterValue ? 'subtle' : 'outline'} size="sm" onClick={() => { setDraftFilterColumn(filterColumn || columnIds[0] || ''); setDraftFilterValue(filterValue); setFilterOpen(true) }}><Filter />Filter{filterColumn && filterValue ? <span className="font-mono text-[length:var(--font-size-meta)]">1</span> : null}</Button>
+        <Button variant={sortBy ? 'subtle' : 'outline'} size="sm" onClick={() => { setDraftSortColumn(sortBy || columnIds[0] || ''); setSortOpen(true) }}><SlidersHorizontal />Sort{sortBy ? <span className="font-mono text-[length:var(--font-size-meta)]">1</span> : null}</Button>
         <Button variant="outline" size="sm" onClick={() => setColumnManagerOpen(true)}><Columns3 />Columns <span className="font-mono text-[length:var(--font-size-meta)] text-muted-foreground">{visibleDataCount}/{columns.length}</span></Button>
+        {editing && selectedRowIds.size ? <Badge variant="accent" className="hidden xl:inline-flex">{selectedRowIds.size} selected</Badge> : null}
         <IconButton label="Refresh rows" className="ml-auto" onClick={onRefresh}><RefreshCw className={fetching ? 'animate-spin' : ''} /></IconButton>
       </div>
 
@@ -436,14 +494,29 @@ export function DataGrid({
               <div role="rowgroup" className="relative" style={{ height: virtualizer.getTotalSize() }}>
                 {virtualizer.getVirtualItems().map((virtualRow) => {
                   const row = rowModel[virtualRow.index]
+                  const rowId = dataRowIdentity(row.original, keyColumns, row.index)
+                  const insertedRow = insertedRowIds.has(rowId)
+                  const deletedRow = deletedRowIds.has(rowId)
+                  const selectedRow = selectedRowIds.has(rowId)
                   const cells = new Map(row.getVisibleCells().map((cell) => [cell.column.id, cell]))
                   const renderCell = (column: Column<TableRow, unknown>) => {
                     const cell = cells.get(column.id)
                     if (!cell) return null
                     const rowNumber = column.id === ROW_NUMBER_COLUMN_ID
-                    return <div key={cell.id} role="cell" aria-colindex={visibleColumnIndex.get(column.id)} style={pinnedStyle(column, lastLeftId, firstRightId)} className={cn('flex min-w-0 items-center overflow-hidden border-r border-grid-line px-3 whitespace-nowrap', rowNumber ? 'justify-end bg-background font-mono text-[length:var(--font-size-meta)] text-muted-foreground group-hover/row:bg-accent/35' : column.getIsPinned() && 'bg-background group-hover/row:bg-accent/35')}><span className="truncate">{flexRender(cell.column.columnDef.cell, cell.getContext())}</span></div>
+                    const cellKey = `${rowId}:${column.id}`
+                    const staged = pendingCells?.has(cellKey)
+                    const currentValue = staged ? pendingCells?.get(cellKey) : row.original[column.id]
+                    const activeEditor = editingCell?.rowId === rowId && editingCell.column === column.id
+                    const definition = definitionById.get(column.id)
+                    const editable = editing && !rowNumber && !deletedRow && !definition?.generated && !definition?.identity && (!keyColumns.includes(column.id) || insertedRow)
+                    const validationError = validationErrors.get(cellKey)
+                    const beginEditing = () => { if (editable && !activeEditor) setEditingCell({ rowId, column: column.id, value: currentValue }) }
+                    return <div key={cell.id} role="cell" aria-colindex={visibleColumnIndex.get(column.id)} aria-invalid={validationError ? true : undefined} aria-readonly={!editable} tabIndex={editable && !activeEditor ? 0 : undefined} title={validationError} style={pinnedStyle(column, lastLeftId, firstRightId)} onDoubleClick={beginEditing} onKeyDown={(event) => { if (!activeEditor && editable && (event.key === 'Enter' || event.key === 'F2')) { event.preventDefault(); beginEditing() } }} className={cn('flex min-w-0 items-center overflow-hidden border-r border-grid-line px-3 whitespace-nowrap outline-none', rowNumber ? 'justify-end gap-2 bg-background font-mono text-[length:var(--font-size-meta)] text-muted-foreground group-hover/row:bg-accent/35' : column.getIsPinned() && 'bg-background group-hover/row:bg-accent/35', editable && 'cursor-text focus-visible:bg-accent/55 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/70', staged && 'bg-primary/10 ring-1 ring-inset ring-primary/35', validationError && 'bg-destructive/8 ring-1 ring-inset ring-destructive/50')}>
+                      {rowNumber && editing ? <button type="button" role="checkbox" aria-checked={selectedRow} aria-label={`${selectedRow ? 'Deselect' : 'Select'} row ${rowId}`} className="grid size-5 shrink-0 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => toggleRowSelection(rowId)}>{selectedRow ? <CheckSquare2 className="size-3.5 text-primary" /> : <Square className="size-3.5" />}</button> : null}
+                      {activeEditor && definition && onEditCell ? <TypedCellEditor column={definition} value={editingCell.value} onCommit={(value) => { onEditCell(row.original, column.id, value); setEditingCell(undefined) }} onCancel={() => setEditingCell(undefined)} /> : <span className={cn('truncate', deletedRow && !rowNumber && 'line-through opacity-55')}>{staged ? formatValue(currentValue) : flexRender(cell.column.columnDef.cell, cell.getContext())}</span>}
+                    </div>
                   }
-                  return <div key={row.id} ref={virtualizer.measureElement} data-index={virtualRow.index} role="row" aria-rowindex={virtualRow.index + 2} className="group/row absolute left-0 grid h-[var(--data-row-height)] min-w-full border-b border-grid-line text-[length:var(--font-size-data)] hover:bg-accent/35" style={{ width: totalWidth, transform: `translateY(${virtualRow.start}px)`, gridTemplateColumns }}>
+                  return <div key={row.id} ref={virtualizer.measureElement} data-index={virtualRow.index} role="row" aria-rowindex={virtualRow.index + 2} aria-selected={selectedRow} className={cn('group/row absolute left-0 grid h-[var(--data-row-height)] min-w-full border-b border-grid-line text-[length:var(--font-size-data)] hover:bg-accent/35', insertedRow && 'bg-success/8', deletedRow && 'bg-destructive/8', selectedRow && 'bg-accent/55')} style={{ width: totalWidth, transform: `translateY(${virtualRow.start}px)`, gridTemplateColumns }}>
                     {[...leftColumns, ...centerColumns].map(renderCell)}
                     <div role="presentation" />
                     {rightColumns.map(renderCell)}
@@ -458,6 +531,46 @@ export function DataGrid({
       </div>
 
       <ColumnManager open={columnManagerOpen} onOpenChange={setColumnManagerOpen} table={table} definitions={columns} columnOrder={displayedColumnOrder} onColumnMove={moveDataColumn} onResetOrder={resetOrder} onResetWidths={resetWidths} onResetLayout={resetLayout} />
+
+      <Dialog open={filterOpen} onOpenChange={setFilterOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Filter visible rows</DialogTitle>
+            <DialogDescription>Apply a quick contains filter to the rows loaded on this page.</DialogDescription>
+          </DialogHeader>
+          <PropertyField label="Column" htmlFor="grid-filter-column">
+            <Select id="grid-filter-column" value={draftFilterColumn} onChange={(event) => setDraftFilterColumn(event.target.value)}>
+              {columns.map((column) => <option key={column.key ?? column.name} value={column.key ?? column.name}>{column.name} · {column.type}</option>)}
+            </Select>
+          </PropertyField>
+          <PropertyField label="Contains" htmlFor="grid-filter-value">
+            <Input id="grid-filter-value" value={draftFilterValue} onChange={(event) => setDraftFilterValue(event.target.value)} placeholder="Value to match…" autoFocus />
+          </PropertyField>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => { setFilterColumn(''); setFilterValue(''); setDraftFilterValue(''); setFilterOpen(false) }}>Clear filter</Button>
+            <Button onClick={() => { setFilterColumn(draftFilterColumn); setFilterValue(draftFilterValue); setFilterOpen(false) }}>Apply filter</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={sortOpen} onOpenChange={setSortOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Sort table</DialogTitle>
+            <DialogDescription>Choose a column. Selecting the active column toggles ascending and descending order.</DialogDescription>
+          </DialogHeader>
+          <PropertyField label="Column" htmlFor="grid-sort-column">
+            <Select id="grid-sort-column" value={draftSortColumn} onChange={(event) => setDraftSortColumn(event.target.value)}>
+              {columns.map((column) => <option key={column.key ?? column.name} value={column.key ?? column.name}>{column.name} · {column.type}</option>)}
+            </Select>
+          </PropertyField>
+          <div className="rounded-lg border border-border bg-surface/60 p-3 text-[length:var(--font-size-ui)] text-muted-foreground">Current order: <span className="font-mono text-foreground">{sortBy || 'natural'}</span>{sortBy ? ` · ${sortDirection.toUpperCase()}` : ''}</div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSortOpen(false)}>Cancel</Button>
+            <Button disabled={!draftSortColumn} onClick={() => { onSort(draftSortColumn); setSortOpen(false) }}>Sort by column</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

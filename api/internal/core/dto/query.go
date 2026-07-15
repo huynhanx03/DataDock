@@ -115,21 +115,89 @@ type DatabasePerformance struct {
 }
 
 type TableRowsInput struct {
-	ConnectionID string
-	Table        string
-	Limit        int
-	Offset       int
-	Search       string
-	Sort         string
-	Order        string
+	ConnectionID string        `json:"connectionId,omitempty"`
+	Reference    string        `json:"reference"`
+	Table        string        `json:"table,omitempty"`
+	Limit        int           `json:"limit"`
+	Offset       int           `json:"offset"`
+	Search       string        `json:"search,omitempty"`
+	Columns      []string      `json:"columns,omitempty"`
+	Sorts        []TableSort   `json:"sorts,omitempty"`
+	Filters      []TableFilter `json:"filters,omitempty"`
+	IncludeTotal bool          `json:"includeTotal"`
+	Sort         string        `json:"sort,omitempty"`
+	Order        string        `json:"order,omitempty"`
 }
 
 type TableRowsResult struct {
-	Columns []string `json:"columns"`
-	Rows    [][]any  `json:"rows"`
-	Total   int64    `json:"total"`
-	Limit   int      `json:"limit"`
-	Offset  int      `json:"offset"`
+	Columns           []DataColumn `json:"columns"`
+	Rows              [][]any      `json:"rows"`
+	PrimaryKeyColumns []string     `json:"primaryKeyColumns"`
+	Total             *int64       `json:"total,omitempty"`
+	Limit             int          `json:"limit"`
+	Offset            int          `json:"offset"`
+	HasMore           bool         `json:"hasMore"`
+	NextOffset        int          `json:"nextOffset,omitempty"`
+	DurationMS        int64        `json:"durationMs"`
+	Truncated         bool         `json:"truncated"`
+}
+
+type TableSort struct {
+	Column    string `json:"column"`
+	Direction string `json:"direction"`
+}
+
+type TableFilter struct {
+	Column   string `json:"column"`
+	Operator string `json:"operator"`
+	Value    any    `json:"value,omitempty"`
+}
+
+type LogicalType string
+
+const (
+	LogicalTypeString   LogicalType = "string"
+	LogicalTypeBoolean  LogicalType = "boolean"
+	LogicalTypeInteger  LogicalType = "integer"
+	LogicalTypeBigInt   LogicalType = "bigint"
+	LogicalTypeDecimal  LogicalType = "decimal"
+	LogicalTypeFloat    LogicalType = "float"
+	LogicalTypeDate     LogicalType = "date"
+	LogicalTypeTime     LogicalType = "time"
+	LogicalTypeDateTime LogicalType = "datetime"
+	LogicalTypeJSON     LogicalType = "json"
+	LogicalTypeBinary   LogicalType = "binary"
+	LogicalTypeUUID     LogicalType = "uuid"
+	LogicalTypeEnum     LogicalType = "enum"
+	LogicalTypeUnknown  LogicalType = "unknown"
+)
+
+type ValueEncoding string
+
+const (
+	ValueEncodingNative   ValueEncoding = "native"
+	ValueEncodingDecimal  ValueEncoding = "decimal-string"
+	ValueEncodingJSON     ValueEncoding = "json-string"
+	ValueEncodingBase64   ValueEncoding = "base64"
+	ValueEncodingTemporal ValueEncoding = "temporal-string"
+)
+
+type DataColumn struct {
+	Key           string        `json:"key"`
+	Name          string        `json:"name"`
+	Type          string        `json:"type"`
+	DatabaseType  string        `json:"databaseType"`
+	LogicalType   LogicalType   `json:"logicalType"`
+	Nullable      bool          `json:"nullable"`
+	DefaultValue  *string       `json:"defaultValue,omitempty"`
+	Precision     *int64        `json:"precision,omitempty"`
+	Scale         *int64        `json:"scale,omitempty"`
+	Length        *int64        `json:"length,omitempty"`
+	EnumValues    []string      `json:"enumValues,omitempty"`
+	Identity      bool          `json:"identity"`
+	Generated     bool          `json:"generated"`
+	PrimaryKey    bool          `json:"primaryKey"`
+	ValueEncoding ValueEncoding `json:"valueEncoding"`
 }
 
 type RowMutation struct {
@@ -153,11 +221,19 @@ type TableSchema struct {
 }
 
 type TableColumn struct {
-	Name         string  `json:"name"`
-	DataType     string  `json:"dataType"`
-	Nullable     bool    `json:"nullable"`
-	DefaultValue *string `json:"defaultValue"`
-	Comment      string  `json:"comment"`
+	Name         string   `json:"name"`
+	DataType     string   `json:"dataType"`
+	DatabaseType string   `json:"databaseType"`
+	Nullable     bool     `json:"nullable"`
+	DefaultValue *string  `json:"defaultValue"`
+	Comment      string   `json:"comment"`
+	Precision    *int64   `json:"precision,omitempty"`
+	Scale        *int64   `json:"scale,omitempty"`
+	Length       *int64   `json:"length,omitempty"`
+	EnumValues   []string `json:"enumValues,omitempty"`
+	Identity     bool     `json:"identity"`
+	Generated    bool     `json:"generated"`
+	PrimaryKey   bool     `json:"primaryKey"`
 }
 
 type TableIndex struct {

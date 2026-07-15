@@ -1,327 +1,413 @@
-import type { Connection, ConnectionInput, ConnectionTestResult } from '../entities/connection'
+import type { ApiCatalogTree, ApiTableMutationResult, ApiTableRowsResult, ApiTableSchema } from './contracts/catalog'
+import type { ApiConnection, ApiConnectionStatus, ApiConnectionTestResult } from './contracts/connection'
+import type { ApiOperationsDashboard, ApiOperationsLocks, ApiOperationsPerformance, ApiOperationsSessions } from './contracts/operations'
+import type { ApiQueryExecutionResult, ApiQueryHistoryItem } from './contracts/query'
+import type { ApiPublicSavedQuery, ApiSavedQuery, ApiSavedQueryFolder, ApiSavedQueryShare } from './contracts/saved-query'
+import type { ApiSchemaApplyResult, ApiSchemaPreview } from './contracts/schema'
+import type { ApiTransaction } from './contracts/transaction'
+import type { ApiWorkspace } from './contracts/workspace'
+import type { ConnectionInput } from '../entities/connection'
 import type {
-  CatalogTree,
   CreateIndexInput,
   CreateTableInput,
-  DataColumn,
-  DatabaseDashboard,
-  DatabaseLocks,
-  DatabaseObject,
-  DatabasePerformance,
-  DatabaseSessions,
   RowMutation,
   TableAlteration,
-  TableMutateResult,
   TableRowsInput,
-  TableRowsResult,
-  TableSchema,
-  TableRow,
 } from '../entities/database-object'
 import type {
+  CreateSavedQueryFolderInput,
   CreateSavedQueryInput,
   ExecuteQueryInput,
-  QueryHistoryItem,
-  QueryResult,
-  SavedQuery,
+  ExplainQueryInput,
   TransactionAction,
-  TransactionState,
+  UpdateSavedQueryFolderInput,
+  UpdateSavedQueryInput,
 } from '../entities/query'
-import type { CreateWorkspaceInput, UpdateWorkspaceInput, Workspace } from '../entities/workspace'
-import { API_ENDPOINTS, buildApiUrl } from '../shared/config/api-endpoints'
+import type { SchemaAction, SchemaApplyInput, SchemaTarget } from '../entities/schema'
+import type { CreateWorkspaceInput, UpdateWorkspaceInput } from '../entities/workspace'
+import { API_ENDPOINTS, withSearch } from '../shared/config/api-endpoints'
 import { APP_CONFIG } from '../shared/config/constants'
-import { GatewayError, type DataDockGateway } from './gateway'
+import { type DataDockGateway, GatewayError } from './gateway'
+import { ApiClient } from './http-client'
+import { mapCatalog } from './mappers/catalog'
+import { mapConnection, mapConnectionStatus, mapConnectionTest, toConnectionRequest } from './mappers/connection'
+import { mapDashboard, mapLocks, mapPerformance, mapSessions } from './mappers/operations'
+import { mapQueryHistoryItem, mapQueryResult } from './mappers/query'
+import { mapPublicSavedQuery, mapSavedQuery, mapSavedQueryFolder, mapSavedQueryShare } from './mappers/saved-query'
+import { mapSchemaApplyResult, mapSchemaPreview } from './mappers/schema'
+import { mapTableMutationResult, mapTableRows, mapTableSchema, toTableMutationsRequest, toTableRowsRequest } from './mappers/table'
+import { mapTransaction } from './mappers/transaction'
+import { mapWorkspace } from './mappers/workspace'
 
-type ApiEnvelope<T> = { data: T }
-type ApiErrorEnvelope = { error?: { code?: string; message?: string } }
-type RawRows = { columns?: string[]; rows?: unknown[][]; total?: number; limit?: number; offset?: number }
-type RawQueryResult = { columns?: string[]; rows?: unknown[][]; rowsAffected?: number; durationMs?: number; message?: string }
-
-function normalizeConnection(connection: Omit<Connection, 'status'> & Partial<Pick<Connection, 'status'>>) : Connection {
-  return { ...connection, status: connection.status ?? 'disconnected' }
+function json(body: unknown): RequestInit {
+  return { body: JSON.stringify(body) }
 }
 
-function inferType(values: unknown[]) {
-  const value = values.find((item) => item !== null && item !== undefined)
-  if (typeof value === 'number') return Number.isInteger(value) ? 'integer' : 'numeric'
-  if (typeof value === 'boolean') return 'boolean'
-  if (value instanceof Date) return 'timestamp'
-  if (typeof value === 'object') return 'json'
-  return 'text'
-}
-
-function normalizeColumns(names: string[], rows: unknown[][]): DataColumn[] {
-  const usedKeys = new Set<string>()
-  return names.map((name, index) => {
-    let key = name
-    let suffix = 2
-    while (usedKeys.has(key)) {
-      key = `${name}__${suffix}`
-      suffix += 1
-    }
-    usedKeys.add(key)
-    return { name, key, type: inferType(rows.map((row) => row[index])) }
-  })
-}
-
-function normalizeRows(columns: DataColumn[], rows: unknown[][]): TableRow[] {
-  return rows.map((row) => Object.fromEntries(columns.map((column, index) => [column.key ?? column.name, row[index]])))
-}
-
-function tableNode(connectionId: string, schema: string, name: string, parentId: string): DatabaseObject {
-  return {
-    id: `${connectionId}:table:${schema}.${name}`,
-    connectionId,
-    parentId,
-    name,
-    qualifiedName: `${schema}.${name}`,
-    kind: 'table',
-    schema,
-  }
-}
-
-function catalogFromTables(connection: Connection, tables: string[]): CatalogTree {
-  const defaultSchema = connection.engine === 'postgresql' ? 'public' : connection.database || 'default'
-  const grouped = new Map<string, string[]>()
-  tables.forEach((reference) => {
-    const split = reference.split('.')
-    const schema = split.length > 1 ? split[0] : defaultSchema
-    const name = split.length > 1 ? split.slice(1).join('.') : reference
-    grouped.set(schema, [...(grouped.get(schema) ?? []), name])
-  })
-  const databaseName = connection.database || connection.host
-  const databaseId = `${connection.id}:database:${databaseName}`
-  const schemas: DatabaseObject[] = [...grouped.entries()].map(([schema, names]) => {
-    const schemaId = `${connection.id}:schema:${schema}`
-    const tablesId = `${schemaId}:group:tables`
-    const groups: DatabaseObject[] = [
-      { id: tablesId, connectionId: connection.id, parentId: schemaId, name: 'Tables', qualifiedName: `${schema}.tables`, kind: 'group', schema, count: names.length, children: names.map((name) => tableNode(connection.id, schema, name, tablesId)) },
-      { id: `${schemaId}:group:views`, connectionId: connection.id, parentId: schemaId, name: 'Views', qualifiedName: `${schema}.views`, kind: 'group', schema, count: 0, children: [] },
-      { id: `${schemaId}:group:functions`, connectionId: connection.id, parentId: schemaId, name: 'Functions', qualifiedName: `${schema}.functions`, kind: 'group', schema, count: 0, children: [] },
-      { id: `${schemaId}:group:procedures`, connectionId: connection.id, parentId: schemaId, name: 'Procedures', qualifiedName: `${schema}.procedures`, kind: 'group', schema, count: 0, children: [] },
-    ]
-    return { id: schemaId, connectionId: connection.id, parentId: databaseId, name: schema, qualifiedName: schema, kind: 'schema', database: databaseName, schema, children: groups }
-  })
-  return {
-    connectionId: connection.id,
-    engine: connection.engine,
-    databases: [{ id: databaseId, connectionId: connection.id, name: databaseName, qualifiedName: databaseName, kind: 'database', database: databaseName, children: schemas }],
-    loadedAt: new Date().toISOString(),
-  }
+function target(reference: string): SchemaTarget {
+  const parts = reference.split('.')
+  if (parts.length < 2) return { table: reference }
+  return { schema: parts.slice(0, -1).join('.'), table: parts.at(-1) ?? reference }
 }
 
 export class HttpDataDockGateway implements DataDockGateway {
   readonly source = 'api' as const
-  private readonly queryHistory: QueryHistoryItem[] = []
-  private historySequence = 0
+  private readonly client = new ApiClient()
+  private readonly transactionConnections = new Map<string, string>()
+  private readonly catalogReferences = new Map<string, Map<string, string>>()
 
-  private async request<T>(path: string, init: RequestInit = {}, signal?: AbortSignal): Promise<T> {
-    const controller = new AbortController()
-    const abort = () => controller.abort(signal?.reason)
-    signal?.addEventListener('abort', abort, { once: true })
-    const timeout = window.setTimeout(() => controller.abort(), APP_CONFIG.api.requestTimeoutMs)
-    const headers = new Headers(init.headers)
-    if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
-    try {
-      const response = await fetch(buildApiUrl(path), { ...init, headers, signal: controller.signal })
-      const text = await response.text()
-      const body = text ? JSON.parse(text) as ApiEnvelope<T> | ApiErrorEnvelope : undefined
-      if (!response.ok) {
-        const error = body as ApiErrorEnvelope | undefined
-        throw new GatewayError(error?.error?.message || `Request failed (${response.status})`, error?.error?.code || 'http_error', response.status)
-      }
-      return body && 'data' in body ? body.data : undefined as T
-    } catch (error) {
-      if (error instanceof GatewayError) throw error
-      if (controller.signal.aborted) throw new GatewayError('Request was cancelled or timed out', 'request_aborted')
-      throw new GatewayError(error instanceof Error ? error.message : 'Network request failed', 'network_error')
-    } finally {
-      window.clearTimeout(timeout)
-      signal?.removeEventListener('abort', abort)
-    }
+  async listWorkspaces(signal?: AbortSignal) {
+    const values = await this.client.request<ApiWorkspace[]>(API_ENDPOINTS.workspaces, { signal })
+    return values.map(mapWorkspace)
   }
 
-  listWorkspaces(signal?: AbortSignal) {
-    return this.request<Workspace[]>(API_ENDPOINTS.workspaces, {}, signal)
+  async createWorkspace(input: CreateWorkspaceInput, signal?: AbortSignal) {
+    const value = await this.client.request<ApiWorkspace>(API_ENDPOINTS.workspaces, { method: 'POST', ...json(input), signal })
+    return mapWorkspace(value)
   }
 
-  createWorkspace(input: CreateWorkspaceInput, signal?: AbortSignal) {
-    return this.request<Workspace>(API_ENDPOINTS.workspaces, { method: 'POST', body: JSON.stringify(input) }, signal)
-  }
-
-  updateWorkspace(id: string, input: UpdateWorkspaceInput, signal?: AbortSignal) {
-    return this.request<Workspace>(API_ENDPOINTS.workspace(id), { method: 'PATCH', body: JSON.stringify(input) }, signal)
+  async updateWorkspace(id: string, input: UpdateWorkspaceInput, signal?: AbortSignal) {
+    const value = await this.client.request<ApiWorkspace>(API_ENDPOINTS.workspace(id), { method: 'PATCH', ...json(input), signal })
+    return mapWorkspace(value)
   }
 
   deleteWorkspace(id: string, signal?: AbortSignal) {
-    return this.request<void>(API_ENDPOINTS.workspace(id), { method: 'DELETE' }, signal)
+    return this.client.request<void>(API_ENDPOINTS.workspace(id), { method: 'DELETE', signal })
   }
 
   reorderWorkspaces(ids: string[], signal?: AbortSignal) {
-    return this.request<void>(API_ENDPOINTS.workspaceOrder, { method: 'PUT', body: JSON.stringify({ ids }) }, signal)
+    return this.client.request<void>(API_ENDPOINTS.workspaceOrder, { method: 'PUT', ...json({ ids }), signal })
   }
 
   async listConnections(workspaceId?: string, signal?: AbortSignal) {
-    const query = workspaceId ? `?${new URLSearchParams({ workspaceId })}` : ''
-    const connections = await this.request<Array<Omit<Connection, 'status'>>>(`${API_ENDPOINTS.connections}${query}`, {}, signal)
-    return connections.map(normalizeConnection)
+    const values = await this.client.request<ApiConnection[]>(withSearch(API_ENDPOINTS.connections, { workspaceId }), { signal })
+    return values.map(mapConnection)
   }
 
   async getConnection(id: string, signal?: AbortSignal) {
-    return normalizeConnection(await this.request<Omit<Connection, 'status'>>(API_ENDPOINTS.connection(id), {}, signal))
+    return mapConnection(await this.client.request<ApiConnection>(API_ENDPOINTS.connection(id), { signal }))
   }
 
   async createConnection(input: ConnectionInput, signal?: AbortSignal) {
-    return normalizeConnection(await this.request<Omit<Connection, 'status'>>(API_ENDPOINTS.connections, { method: 'POST', body: JSON.stringify(input) }, signal))
+    const value = await this.client.request<ApiConnection>(API_ENDPOINTS.connections, { method: 'POST', ...json(toConnectionRequest(input)), signal })
+    return mapConnection(value)
   }
 
   async updateConnection(id: string, input: ConnectionInput, signal?: AbortSignal) {
-    return normalizeConnection(await this.request<Omit<Connection, 'status'>>(API_ENDPOINTS.connection(id), { method: 'PATCH', body: JSON.stringify(input) }, signal))
+    const value = await this.client.request<ApiConnection>(API_ENDPOINTS.connection(id), { method: 'PATCH', ...json(toConnectionRequest(input)), signal })
+    return mapConnection(value)
   }
 
   deleteConnection(id: string, signal?: AbortSignal) {
-    return this.request<void>(API_ENDPOINTS.connection(id), { method: 'DELETE' }, signal)
+    return this.client.request<void>(API_ENDPOINTS.connection(id), { method: 'DELETE', signal })
   }
 
   async duplicateConnection(id: string, signal?: AbortSignal) {
-    return normalizeConnection(await this.request<Omit<Connection, 'status'>>(API_ENDPOINTS.duplicateConnection(id), { method: 'POST' }, signal))
+    const value = await this.client.request<ApiConnection>(API_ENDPOINTS.duplicateConnection(id), { method: 'POST', signal })
+    return mapConnection(value)
   }
 
-  async testConnection(id: string, signal?: AbortSignal): Promise<ConnectionTestResult> {
-    const startedAt = performance.now()
-    const result = await this.request<{ ok: boolean }>(API_ENDPOINTS.testConnection(id), { method: 'POST' }, signal)
-    return { ok: result.ok, latencyMs: Math.max(1, Math.round(performance.now() - startedAt)), message: result.ok ? 'Connection successful' : 'Connection failed' }
+  async testConnectionDraft(input: ConnectionInput, signal?: AbortSignal) {
+    const value = await this.client.request<ApiConnectionTestResult>(API_ENDPOINTS.testConnectionDraft, { method: 'POST', ...json(toConnectionRequest(input)), signal })
+    return mapConnectionTest(value)
+  }
+
+  async testConnection(id: string, signal?: AbortSignal) {
+    const value = await this.client.request<ApiConnectionTestResult>(API_ENDPOINTS.testConnection(id), { method: 'POST', signal })
+    return mapConnectionTest(value)
+  }
+
+  async connectConnection(id: string, signal?: AbortSignal) {
+    const value = await this.client.request<ApiConnection>(API_ENDPOINTS.connectConnection(id), { method: 'POST', signal })
+    return mapConnection(value)
+  }
+
+  async disconnectConnection(id: string, signal?: AbortSignal) {
+    const value = await this.client.request<ApiConnection>(API_ENDPOINTS.disconnectConnection(id), { method: 'POST', signal })
+    return mapConnection(value)
+  }
+
+  async getConnectionStatus(id: string, signal?: AbortSignal) {
+    const value = await this.client.request<ApiConnectionStatus>(API_ENDPOINTS.connectionStatus(id), { signal })
+    return mapConnectionStatus(value)
+  }
+
+  async setConnectionFavorite(id: string, favorite: boolean, signal?: AbortSignal) {
+    const value = await this.client.request<ApiConnection>(API_ENDPOINTS.connectionFavorite(id), { method: 'PATCH', ...json({ favorite }), signal })
+    return mapConnection(value)
   }
 
   async listCatalog(connectionId: string, signal?: AbortSignal) {
-    const [connection, tables] = await Promise.all([
-      this.getConnection(connectionId, signal),
-      this.request<string[]>(API_ENDPOINTS.tables(connectionId), {}, signal),
-    ])
-    return catalogFromTables(connection, tables)
+    const endpoint = withSearch(API_ENDPOINTS.catalog(connectionId), { depth: 'all', limit: APP_CONFIG.catalog.pageSize })
+    const catalog = mapCatalog(await this.client.request<ApiCatalogTree>(endpoint, { signal }))
+    const references = new Map<string, string>()
+    const visit = (objects: typeof catalog.databases) => objects.forEach((object) => {
+      if (object.reference) {
+        references.set(object.reference, object.reference)
+        references.set(object.qualifiedName, object.reference)
+      }
+      if (object.children) visit(object.children)
+    })
+    visit(catalog.databases)
+    this.catalogReferences.set(connectionId, references)
+    return catalog
   }
 
-  async getTableRows(connectionId: string, table: string, input: TableRowsInput = {}, signal?: AbortSignal): Promise<TableRowsResult> {
-    const pageSize = Math.min(input.pageSize ?? APP_CONFIG.table.defaultPageSize, APP_CONFIG.table.maxPageSize)
+  async getTableRows(connectionId: string, reference: string, input: TableRowsInput = {}, signal?: AbortSignal) {
+    const pageSize = Math.min(Math.max(1, input.pageSize ?? APP_CONFIG.table.defaultPageSize), APP_CONFIG.table.maxPageSize)
     const page = Math.max(1, input.page ?? 1)
-    const parameters = new URLSearchParams({ limit: String(pageSize), offset: String((page - 1) * pageSize) })
-    if (input.search) parameters.set('search', input.search)
-    if (input.sortBy) parameters.set('sort', input.sortBy)
-    if (input.sortDirection) parameters.set('order', input.sortDirection)
-    const startedAt = performance.now()
-    const result = await this.request<RawRows>(`${API_ENDPOINTS.tableRows(connectionId, table)}?${parameters}`, {}, signal)
-    const rawRows = result.rows ?? []
-    const columns = normalizeColumns(result.columns ?? [], rawRows)
-    return {
-      columns,
-      rows: normalizeRows(columns, rawRows),
-      page: Math.floor((result.offset ?? 0) / (result.limit || pageSize)) + 1,
-      pageSize: result.limit || pageSize,
-      total: result.total ?? rawRows.length,
-      durationMs: Math.max(1, Math.round(performance.now() - startedAt)),
+    const request = toTableRowsRequest(await this.resolveTableReference(connectionId, reference, signal), input, pageSize, page)
+    const value = await this.client.request<ApiTableRowsResult>(API_ENDPOINTS.tableRows(connectionId), { method: 'POST', ...json(request), signal })
+    return mapTableRows(value)
+  }
+
+  async getTableSchema(connectionId: string, reference: string, signal?: AbortSignal) {
+    const endpoint = withSearch(API_ENDPOINTS.tableSchema(connectionId), { reference: await this.resolveTableReference(connectionId, reference, signal) })
+    return mapTableSchema(await this.client.request<ApiTableSchema>(endpoint, { signal }))
+  }
+
+  async getTableDDL(connectionId: string, reference: string, signal?: AbortSignal) {
+    const endpoint = withSearch(API_ENDPOINTS.tableDDL(connectionId), { reference: await this.resolveTableReference(connectionId, reference, signal) })
+    return (await this.client.request<{ ddl: string }>(endpoint, { signal })).ddl
+  }
+
+  mutateTableRows(connectionId: string, reference: string, mutations: RowMutation[], signal?: AbortSignal) {
+    return this.applyTableMutations(connectionId, reference, mutations, undefined, signal)
+  }
+
+  mutateTableRowsInTransaction(connectionId: string, reference: string, mutations: RowMutation[], transactionId: string, signal?: AbortSignal) {
+    return this.applyTableMutations(connectionId, reference, mutations, transactionId, signal)
+  }
+
+  async createTable(connectionId: string, input: CreateTableInput, signal?: AbortSignal) {
+    await this.previewAndApply(connectionId, [{
+      kind: 'create_table',
+      target: { schema: input.schema, table: input.name },
+      columns: input.columns.map((column) => ({ ...column })),
+    }], signal)
+  }
+
+  async alterTable(connectionId: string, reference: string, actions: TableAlteration[], signal?: AbortSignal) {
+    const schemaTarget = target(reference)
+    const schemaActions: SchemaAction[] = actions.map((action) => {
+      if (action.kind === 'add_column') return { kind: 'add_column', target: schemaTarget, column: action.definition }
+      if (action.kind === 'drop_column') return { kind: 'drop_column', target: schemaTarget, name: action.column, cascade: false }
+      if (action.kind === 'rename_column') return { kind: 'rename_column', target: schemaTarget, name: action.column, newName: action.newName }
+      if (action.kind === 'change_type') return { kind: 'alter_column_type', target: schemaTarget, name: action.column, dataType: action.definition?.dataType }
+      if (action.kind === 'set_nullable') return { kind: 'set_column_nullable', target: schemaTarget, name: action.column, nullable: action.definition?.nullable }
+      if (action.kind === 'set_default') return { kind: 'set_column_default', target: schemaTarget, name: action.column, defaultValue: action.definition?.defaultValue }
+      return { kind: 'rename_table', target: schemaTarget, newName: action.newName }
+    })
+    await this.previewAndApply(connectionId, schemaActions, signal)
+  }
+
+  async createIndex(connectionId: string, reference: string, input: CreateIndexInput, signal?: AbortSignal) {
+    await this.previewAndApply(connectionId, [{ kind: 'create_index', target: target(reference), index: { ...input } }], signal)
+  }
+
+  async dropIndex(connectionId: string, reference: string, index: string, signal?: AbortSignal) {
+    await this.previewAndApply(connectionId, [{ kind: 'drop_index', target: target(reference), name: index }], signal)
+  }
+
+  async executeQuery(input: ExecuteQueryInput, signal?: AbortSignal) {
+    const executionId = input.executionId ?? crypto.randomUUID()
+    const value = await this.client.request<ApiQueryExecutionResult>(API_ENDPOINTS.executeQuery, {
+      method: 'POST',
+      ...json({ ...input, executionId }),
+      signal,
+    })
+    return mapQueryResult(value)
+  }
+
+  async explainQuery(input: ExplainQueryInput, signal?: AbortSignal) {
+    const executionId = input.executionId ?? crypto.randomUUID()
+    const value = await this.client.request<ApiQueryExecutionResult>(API_ENDPOINTS.explainQuery, {
+      method: 'POST',
+      ...json({ ...input, executionId, analyze: input.analyze ?? false }),
+      signal,
+    })
+    return mapQueryResult(value)
+  }
+
+  cancelQuery(executionId: string, signal?: AbortSignal) {
+    return this.client.request<void>(API_ENDPOINTS.cancelQuery(executionId), { method: 'POST', signal })
+  }
+
+  async listQueryHistory(connectionId?: string, signal?: AbortSignal) {
+    const values = await this.client.request<ApiQueryHistoryItem[]>(withSearch(API_ENDPOINTS.queryHistory, { connectionId }), { signal })
+    return values.map(mapQueryHistoryItem)
+  }
+
+  clearQueryHistory(connectionId?: string, signal?: AbortSignal) {
+    return this.client.request<void>(withSearch(API_ENDPOINTS.queryHistory, { connectionId }), { method: 'DELETE', signal })
+  }
+
+  deleteQueryHistory(ids: string[], signal?: AbortSignal) {
+    return this.client.request<void>(API_ENDPOINTS.deleteQueryHistory, { method: 'POST', ...json({ ids }), signal })
+  }
+
+  async beginTransaction(connectionId: string, signal?: AbortSignal) {
+    const value = await this.client.request<ApiTransaction>(API_ENDPOINTS.transactions(connectionId), { method: 'POST', signal })
+    this.transactionConnections.set(value.id, connectionId)
+    return mapTransaction(value)
+  }
+
+  async getTransaction(connectionId: string, id: string, signal?: AbortSignal) {
+    const value = await this.client.request<ApiTransaction>(API_ENDPOINTS.transaction(connectionId, id), { signal })
+    this.transactionConnections.set(value.id, connectionId)
+    return mapTransaction(value)
+  }
+
+  async transactionAction(id: string, action: TransactionAction, name?: string, signal?: AbortSignal) {
+    const connectionId = this.transactionConnections.get(id)
+    if (!connectionId) throw new GatewayError('The transaction connection is unavailable', 'transaction_context_missing')
+    let endpoint: string
+    let method = 'POST'
+    let body: RequestInit = {}
+    if (action === 'commit' || action === 'rollback') endpoint = API_ENDPOINTS.transactionAction(connectionId, id, action)
+    else if (action === 'savepoint') {
+      endpoint = API_ENDPOINTS.transactionSavepoints(connectionId, id)
+      body = json({ name })
+    } else if (action === 'rollback_to') endpoint = API_ENDPOINTS.transactionSavepointRollback(connectionId, id, name ?? '')
+    else {
+      endpoint = API_ENDPOINTS.transactionSavepoint(connectionId, id, name ?? '')
+      method = 'DELETE'
     }
+    const value = await this.client.request<ApiTransaction>(endpoint, { method, ...body, signal })
+    if (value.state !== 'active') this.transactionConnections.delete(id)
+    return mapTransaction(value)
   }
 
-  getTableSchema(connectionId: string, table: string, signal?: AbortSignal) {
-    return this.request<TableSchema>(API_ENDPOINTS.tableSchema(connectionId, table), {}, signal)
+  async previewSchema(connectionId: string, actions: SchemaAction[], signal?: AbortSignal) {
+    const value = await this.client.request<ApiSchemaPreview>(API_ENDPOINTS.schemaPreview(connectionId), { method: 'POST', ...json({ actions }), signal })
+    return mapSchemaPreview(value)
   }
 
-  async getTableDDL(connectionId: string, table: string, signal?: AbortSignal) {
-    return (await this.request<{ ddl: string }>(API_ENDPOINTS.tableDDL(connectionId, table), {}, signal)).ddl
+  async applySchema(connectionId: string, input: SchemaApplyInput, signal?: AbortSignal) {
+    const value = await this.client.request<ApiSchemaApplyResult>(API_ENDPOINTS.schemaApply(connectionId), { method: 'POST', ...json(input), signal })
+    return mapSchemaApplyResult(value)
   }
 
-  mutateTableRows(connectionId: string, table: string, mutations: RowMutation[], signal?: AbortSignal) {
-    return this.request<TableMutateResult>(API_ENDPOINTS.tableMutations(connectionId, table), { method: 'POST', body: JSON.stringify({ mutations }) }, signal)
+  async getDashboard(connectionId: string, signal?: AbortSignal) {
+    const endpoint = withSearch(API_ENDPOINTS.dashboard(connectionId), APP_CONFIG.operations.dashboardQuery)
+    return mapDashboard(await this.client.request<ApiOperationsDashboard>(endpoint, { signal }))
   }
 
-  createTable(connectionId: string, input: CreateTableInput, signal?: AbortSignal) {
-    return this.request<void>(API_ENDPOINTS.schemaTables(connectionId), { method: 'POST', body: JSON.stringify(input) }, signal)
+  async getSessions(connectionId: string, signal?: AbortSignal) {
+    const endpoint = withSearch(API_ENDPOINTS.sessions(connectionId), APP_CONFIG.operations.sessionsQuery)
+    return mapSessions(await this.client.request<ApiOperationsSessions>(endpoint, { signal }))
   }
 
-  alterTable(connectionId: string, table: string, actions: TableAlteration[], signal?: AbortSignal) {
-    return this.request<void>(API_ENDPOINTS.tableSchema(connectionId, table), { method: 'PATCH', body: JSON.stringify({ actions }) }, signal)
+  cancelSession(connectionId: string, sessionId: string, force = false, signal?: AbortSignal) {
+    return this.client.request<void>(API_ENDPOINTS.controlSession(connectionId, sessionId), {
+      method: 'POST',
+      ...json({ action: force ? 'terminate' : 'cancel' }),
+      signal,
+    })
   }
 
-  createIndex(connectionId: string, table: string, input: CreateIndexInput, signal?: AbortSignal) {
-    return this.request<void>(API_ENDPOINTS.tableIndexes(connectionId, table), { method: 'POST', body: JSON.stringify(input) }, signal)
+  async getLocks(connectionId: string, signal?: AbortSignal) {
+    const endpoint = withSearch(API_ENDPOINTS.locks(connectionId), APP_CONFIG.operations.locksQuery)
+    return mapLocks(await this.client.request<ApiOperationsLocks>(endpoint, { signal }))
   }
 
-  dropIndex(connectionId: string, table: string, index: string, signal?: AbortSignal) {
-    return this.request<void>(API_ENDPOINTS.tableIndex(connectionId, table, index), { method: 'DELETE' }, signal)
+  async getPerformance(connectionId: string, signal?: AbortSignal) {
+    const endpoint = withSearch(API_ENDPOINTS.performance(connectionId), APP_CONFIG.operations.performanceQuery)
+    return mapPerformance(await this.client.request<ApiOperationsPerformance>(endpoint, { signal }))
   }
 
-  async executeQuery(input: ExecuteQueryInput, signal?: AbortSignal): Promise<QueryResult> {
-    const executedAt = new Date().toISOString()
+  async listSavedQueries(signal?: AbortSignal) {
+    const values = await this.client.request<ApiSavedQuery[]>(API_ENDPOINTS.savedQueries, { signal })
+    return values.map(mapSavedQuery)
+  }
+
+  async getSavedQuery(id: string, signal?: AbortSignal) {
+    return mapSavedQuery(await this.client.request<ApiSavedQuery>(API_ENDPOINTS.savedQuery(id), { signal }))
+  }
+
+  async createSavedQuery(input: CreateSavedQueryInput, signal?: AbortSignal) {
+    const value = await this.client.request<ApiSavedQuery>(API_ENDPOINTS.savedQueries, { method: 'POST', ...json(input), signal })
+    return mapSavedQuery(value)
+  }
+
+  async updateSavedQuery(id: string, input: UpdateSavedQueryInput, signal?: AbortSignal) {
+    const value = await this.client.request<ApiSavedQuery>(API_ENDPOINTS.savedQuery(id), { method: 'PATCH', ...json(input), signal })
+    return mapSavedQuery(value)
+  }
+
+  async duplicateSavedQuery(id: string, signal?: AbortSignal) {
+    const value = await this.client.request<ApiSavedQuery>(API_ENDPOINTS.duplicateSavedQuery(id), { method: 'POST', signal })
+    return mapSavedQuery(value)
+  }
+
+  async setSavedQueryFavorite(id: string, favorite: boolean, signal?: AbortSignal) {
+    const value = await this.client.request<ApiSavedQuery>(API_ENDPOINTS.favoriteSavedQuery(id), { method: 'PATCH', ...json({ favorite }), signal })
+    return mapSavedQuery(value)
+  }
+
+  deleteSavedQuery(id: string, signal?: AbortSignal) {
+    return this.client.request<void>(API_ENDPOINTS.savedQuery(id), { method: 'DELETE', signal })
+  }
+
+  async getSavedQueryShare(id: string, signal?: AbortSignal) {
     try {
-      const result = await this.request<RawQueryResult>(API_ENDPOINTS.executeQuery, { method: 'POST', body: JSON.stringify(input) }, signal)
-      const rawRows = result.rows ?? []
-      const columns = normalizeColumns(result.columns ?? [], rawRows)
-      const normalized = { columns, rows: normalizeRows(columns, rawRows), rowsAffected: result.rowsAffected ?? 0, durationMs: result.durationMs ?? 0, message: result.message }
-      this.queryHistory.unshift({ id: `http-history-${++this.historySequence}`, connectionId: input.connectionId, sqlText: input.sql, status: 'success', durationMs: normalized.durationMs, rowCount: normalized.rows.length || normalized.rowsAffected, executedAt })
-      this.queryHistory.splice(APP_CONFIG.query.historyLimit)
-      return normalized
+      const value = await this.client.request<ApiSavedQueryShare>(API_ENDPOINTS.savedQueryShare(id), { signal })
+      return mapSavedQueryShare(value)
     } catch (error) {
-      this.queryHistory.unshift({ id: `http-history-${++this.historySequence}`, connectionId: input.connectionId, sqlText: input.sql, status: 'error', durationMs: 0, rowCount: 0, error: error instanceof Error ? error.message : 'Query failed', executedAt })
+      if (error instanceof GatewayError && error.status === 404) return null
       throw error
     }
   }
 
-  async listQueryHistory(connectionId?: string, signal?: AbortSignal) {
-    if (signal?.aborted) throw new GatewayError('Request was cancelled', 'request_aborted')
-    return this.queryHistory.filter((item) => !connectionId || item.connectionId === connectionId).map((item) => ({ ...item }))
+  async shareSavedQuery(id: string, expiresAt?: string, signal?: AbortSignal) {
+    const value = await this.client.request<ApiSavedQueryShare>(API_ENDPOINTS.savedQueryShare(id), { method: 'POST', ...json({ expiresAt }), signal })
+    return mapSavedQueryShare(value)
   }
 
-  async clearQueryHistory(connectionId?: string, signal?: AbortSignal) {
-    if (signal?.aborted) throw new GatewayError('Request was cancelled', 'request_aborted')
-    if (!connectionId) {
-      this.queryHistory.length = 0
-      return
-    }
-    for (let index = this.queryHistory.length - 1; index >= 0; index -= 1) {
-      if (this.queryHistory[index].connectionId === connectionId) this.queryHistory.splice(index, 1)
-    }
+  revokeSavedQueryShare(id: string, signal?: AbortSignal) {
+    return this.client.request<void>(API_ENDPOINTS.savedQueryShare(id), { method: 'DELETE', signal })
   }
 
-  async beginTransaction(connectionId: string, signal?: AbortSignal) {
-    return this.normalizeTransaction(await this.request<TransactionState>(API_ENDPOINTS.beginTransaction, { method: 'POST', body: JSON.stringify({ connectionId }) }, signal))
+  async getSharedQuery(code: string, signal?: AbortSignal) {
+    return mapPublicSavedQuery(await this.client.request<ApiPublicSavedQuery>(API_ENDPOINTS.sharedQuery(code), { signal }))
   }
 
-  async transactionAction(id: string, action: TransactionAction, name?: string, signal?: AbortSignal) {
-    return this.normalizeTransaction(await this.request<TransactionState>(API_ENDPOINTS.transactionAction(id, action), { method: 'POST', body: JSON.stringify({ name }) }, signal))
+  async listSavedQueryFolders(signal?: AbortSignal) {
+    const values = await this.client.request<ApiSavedQueryFolder[]>(API_ENDPOINTS.savedQueryFolders, { signal })
+    return values.map(mapSavedQueryFolder)
   }
 
-  getDashboard(connectionId: string, signal?: AbortSignal) {
-    return this.request<DatabaseDashboard>(API_ENDPOINTS.dashboard(connectionId), {}, signal)
+  async createSavedQueryFolder(input: CreateSavedQueryFolderInput, signal?: AbortSignal) {
+    const value = await this.client.request<ApiSavedQueryFolder>(API_ENDPOINTS.savedQueryFolders, { method: 'POST', ...json({ ...input, position: input.position ?? 0 }), signal })
+    return mapSavedQueryFolder(value)
   }
 
-  getSessions(connectionId: string, signal?: AbortSignal) {
-    return this.request<DatabaseSessions>(API_ENDPOINTS.sessions(connectionId), {}, signal)
+  async updateSavedQueryFolder(id: string, input: UpdateSavedQueryFolderInput, signal?: AbortSignal) {
+    const value = await this.client.request<ApiSavedQueryFolder>(API_ENDPOINTS.savedQueryFolder(id), { method: 'PATCH', ...json(input), signal })
+    return mapSavedQueryFolder(value)
   }
 
-  cancelSession(connectionId: string, sessionId: string, force = false, signal?: AbortSignal) {
-    return this.request<void>(API_ENDPOINTS.cancelSession(connectionId, sessionId), { method: 'POST', body: JSON.stringify({ force }) }, signal)
+  deleteSavedQueryFolder(id: string, policy: 'reject' | 'move' = 'reject', destination = '', signal?: AbortSignal) {
+    return this.client.request<void>(API_ENDPOINTS.savedQueryFolder(id), { method: 'DELETE', ...json({ policy, destination }), signal })
   }
 
-  getLocks(connectionId: string, signal?: AbortSignal) {
-    return this.request<DatabaseLocks>(API_ENDPOINTS.locks(connectionId), {}, signal)
+  private async applyTableMutations(connectionId: string, reference: string, mutations: RowMutation[], transactionId?: string, signal?: AbortSignal) {
+    const resolvedReference = await this.resolveTableReference(connectionId, reference, signal)
+    const request = toTableMutationsRequest(resolvedReference, mutations, transactionId)
+    const value = await this.client.request<ApiTableMutationResult>(API_ENDPOINTS.tableMutations(connectionId), { method: 'POST', ...json(request), signal })
+    return mapTableMutationResult(value)
   }
 
-  getPerformance(connectionId: string, signal?: AbortSignal) {
-    return this.request<DatabasePerformance>(API_ENDPOINTS.performance(connectionId), {}, signal)
+  private async previewAndApply(connectionId: string, actions: SchemaAction[], signal?: AbortSignal) {
+    const preview = await this.previewSchema(connectionId, actions, signal)
+    await this.applySchema(connectionId, { actions: preview.actions, previewHash: preview.hash, confirmDestructive: preview.destructive }, signal)
   }
 
-  listSavedQueries(signal?: AbortSignal) {
-    return this.request<SavedQuery[]>(API_ENDPOINTS.savedQueries, {}, signal)
-  }
-
-  createSavedQuery(input: CreateSavedQueryInput, signal?: AbortSignal) {
-    return this.request<SavedQuery>(API_ENDPOINTS.savedQueries, { method: 'POST', body: JSON.stringify(input) }, signal)
-  }
-
-  deleteSavedQuery(id: string, signal?: AbortSignal) {
-    return this.request<void>(API_ENDPOINTS.savedQuery(id), { method: 'DELETE' }, signal)
-  }
-
-  private normalizeTransaction(transaction: TransactionState): TransactionState {
-    return transaction
+  private async resolveTableReference(connectionId: string, value: string, signal?: AbortSignal) {
+    const cached = this.catalogReferences.get(connectionId)?.get(value)
+    if (cached) return cached
+    await this.listCatalog(connectionId, signal)
+    const resolved = this.catalogReferences.get(connectionId)?.get(value)
+    if (!resolved) throw new GatewayError('The table is no longer present in the loaded catalog', 'catalog_reference_missing', 404)
+    return resolved
   }
 }

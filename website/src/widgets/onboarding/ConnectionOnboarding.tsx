@@ -1,11 +1,13 @@
 import { ArrowRight, Braces, Check, Clock3, Database, Play, Plus, ShieldCheck, Sparkles, Zap } from 'lucide-react'
 import type { Connection, DatabaseEngine } from '@/entities/connection'
 import { APP_CONFIG } from '@/shared/config/constants'
+import type { DataSource } from '@/shared/config/env'
 import { cn } from '@/shared/lib/cn'
 import { Badge, Button } from '@/shared/ui'
 
 type ConnectionOnboardingProps = {
   connections: Connection[]
+  source: DataSource
   onNewConnection: (engine?: DatabaseEngine) => void
   onSelectConnection: (connection: Connection) => void
 }
@@ -49,8 +51,8 @@ function WorkspacePreview() {
           <span className="size-2 rounded-full bg-amber-400/70" />
           <span className="size-2 rounded-full bg-emerald-400/70" />
         </div>
-        <span className="ml-2 font-mono text-[length:var(--font-size-meta)] text-muted-foreground">customers.sql</span>
-        <Badge variant="success" className="ml-auto text-[length:var(--font-size-meta)]">18 ms</Badge>
+        <span className="ml-2 font-mono text-[length:var(--font-size-meta)] text-muted-foreground">{APP_CONFIG.query.fileName}</span>
+        <Badge variant="accent" className="ml-auto text-[length:var(--font-size-meta)]">Preview</Badge>
       </div>
       <div className="grid grid-cols-[42px_1fr] border-b border-border/80 bg-background/40 font-mono text-[length:var(--font-size-data)] leading-6">
         <div className="border-r border-border/70 py-3 pr-2 text-right text-muted-foreground/60">1<br />2<br />3</div>
@@ -76,8 +78,8 @@ function WorkspacePreview() {
   )
 }
 
-export function ConnectionOnboarding({ connections, onNewConnection, onSelectConnection }: ConnectionOnboardingProps) {
-  const demoConnection = connections.find((connection) => connection.status === 'connected') || connections[0]
+export function ConnectionOnboarding({ connections, source, onNewConnection, onSelectConnection }: ConnectionOnboardingProps) {
+  const featuredConnection = connections.find((connection) => connection.status === 'connected') || connections[0]
 
   return (
     <div className="relative h-full overflow-y-auto bg-background">
@@ -102,16 +104,16 @@ export function ConnectionOnboarding({ connections, onNewConnection, onSelectCon
                 <Plus />
                 New connection
               </Button>
-              {demoConnection ? (
-                <Button size="lg" variant="outline" onClick={() => onSelectConnection(demoConnection)}>
+              {featuredConnection ? (
+                <Button size="lg" variant="outline" onClick={() => onSelectConnection(featuredConnection)}>
                   <Play />
-                  Explore demo workspace
+                  {source === 'mock' ? 'Explore demo workspace' : 'Browse saved connection'}
                 </Button>
               ) : null}
             </div>
             <div className="mt-7 flex flex-wrap gap-x-5 gap-y-2 text-[length:var(--font-size-meta)] text-muted-foreground">
               <span className="flex items-center gap-1.5"><ShieldCheck className="size-3.5 text-emerald-400" />Credentials stay encrypted</span>
-              <span className="flex items-center gap-1.5"><Zap className="size-3.5 text-amber-400" />Mock-first, instant preview</span>
+              <span className="flex items-center gap-1.5"><Zap className="size-3.5 text-amber-400" />{source === 'mock' ? 'Mock-first, instant preview' : 'Live API, persisted profiles'}</span>
             </div>
           </section>
           <WorkspacePreview />

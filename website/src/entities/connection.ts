@@ -34,11 +34,15 @@ export type Connection = {
   maxOpenConns: number
   maxIdleConns: number
   connMaxLifetimeSeconds: number
+  connMaxIdleTimeSeconds?: number
   favorite: boolean
   hasPassword: boolean
+  hasProxyCredentials?: boolean
   status: ConnectionStatus
   latencyMs?: number
   lastConnectedAt?: string
+  lastErrorCode?: string
+  activeTransactions?: number
   createdAt: string
   updatedAt: string
 }
@@ -57,12 +61,15 @@ export type ConnectionInput = {
   sslCertPath: string
   sslKeyPath: string
   proxyUrl: string
-  sshTunnel: Omit<SSHTunnel, 'hasPassword'> & { password: string }
+  sshTunnel: Omit<SSHTunnel, 'hasPassword'> & { password: string; clearPassword?: boolean }
   readOnly: boolean
   autoReconnect: boolean
   maxOpenConns: number
   maxIdleConns: number
   connMaxLifetimeSeconds: number
+  connMaxIdleTimeSeconds?: number
+  clearPassword?: boolean
+  clearProxyCredentials?: boolean
 }
 
 export type CreateConnectionInput = ConnectionInput
@@ -72,6 +79,14 @@ export type ConnectionTestResult = {
   ok: boolean
   latencyMs: number
   message: string
+}
+
+export type ConnectionRuntimeStatus = {
+  status: ConnectionStatus
+  latencyMs?: number
+  lastConnectedAt?: string
+  lastErrorCode?: string
+  activeTransactions?: number
 }
 
 export type EngineCapability = {

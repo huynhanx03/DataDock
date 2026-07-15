@@ -3,6 +3,7 @@ import type { DatabaseObject } from '@/entities/database-object'
 
 export type ActivityId =
   | 'explorer'
+  | 'connections'
   | 'query'
   | 'history'
   | 'saved'
@@ -17,7 +18,7 @@ export type ActivityItem = {
   shortcut?: string
 }
 
-export type WorkbenchTabKind = 'welcome' | 'table' | 'query' | 'operations' | 'saved'
+export type WorkbenchTabKind = 'welcome' | 'table' | 'schema' | 'query' | 'operations' | 'saved'
 
 export type WorkbenchTab = {
   id: string
@@ -35,5 +36,7 @@ export type InspectorContext = {
   status: string
   readOnly: boolean
   latencyMs?: number
+  source: 'mock' | 'api'
+  transport: string
   object?: DatabaseObject
 }

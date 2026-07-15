@@ -11,7 +11,7 @@ type StatusBarProps = {
 
 export function StatusBar({ connectionName, connected, latencyMs, message }: StatusBarProps) {
   return (
-    <footer className="flex h-7 shrink-0 items-center gap-4 border-t border-border bg-surface/85 px-3 font-mono text-[length:var(--font-size-meta)] text-muted-foreground" aria-label="Application status">
+    <footer className="flex h-7 shrink-0 items-center gap-4 border-t border-border bg-surface/85 px-3 font-mono text-[length:var(--font-size-meta)] text-muted-foreground" aria-label="Application status" aria-live="polite">
       <span className="flex min-w-0 items-center gap-1.5">
         <span className={cn('size-1.5 shrink-0 rounded-full bg-muted-foreground', connected && 'bg-emerald-400 shadow-[0_0_8px_color-mix(in_oklab,var(--primitive-emerald-400)_55%,transparent)]')} />
         <span className="truncate">{message || (connectionName ? connectionName : 'Ready')}</span>

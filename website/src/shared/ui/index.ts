@@ -49,6 +49,9 @@ export {
   DropdownMenuTrigger,
 } from '@/shared/ui/dropdown-menu'
 export { Input, type InputProps } from '@/shared/ui/input'
+export { Checkbox, Select, Switch, Textarea } from '@/shared/ui/form-controls'
+export { EmptyState } from '@/shared/ui/empty-state'
+export { PropertyField, PropertyGrid } from '@/shared/ui/property-field'
 export {
   ResizableHandle,
   ResizablePanel,
@@ -65,3 +68,11 @@ export {
   TooltipProvider,
   TooltipTrigger,
 } from '@/shared/ui/tooltip'
+export {
+  MasterDetailLayout,
+  SectionHeading,
+  WorkspaceHeader,
+  WorkspacePage,
+  WorkspacePanel,
+  WorkspaceToolbar,
+} from '@/shared/ui/workspace'

@@ -30,29 +30,33 @@ const (
 )
 
 type Connection struct {
-	ID              string    `json:"id"`
-	WorkspaceID     string    `json:"workspaceId"`
-	Name            string    `json:"name"`
-	Engine          Engine    `json:"engine"`
-	Host            string    `json:"host"`
-	Port            int       `json:"port"`
-	Database        string    `json:"database"`
-	Username        string    `json:"username"`
-	PasswordCipher  string    `json:"-"`
-	SSLMode         SSLMode   `json:"sslMode"`
-	SSLCAPath       string    `json:"sslCaPath"`
-	SSLCertPath     string    `json:"sslCertPath"`
-	SSLKeyPath      string    `json:"sslKeyPath"`
-	ProxyURL        string    `json:"proxyUrl"`
-	SSHTunnel       SSHTunnel `json:"sshTunnel"`
-	ReadOnly        bool      `json:"readOnly"`
-	AutoReconnect   bool      `json:"autoReconnect"`
-	MaxOpenConns    int       `json:"maxOpenConns"`
-	MaxIdleConns    int       `json:"maxIdleConns"`
-	ConnMaxLifetime int       `json:"connMaxLifetimeSeconds"`
-	Favorite        bool      `json:"favorite"`
-	CreatedAt       time.Time `json:"createdAt"`
-	UpdatedAt       time.Time `json:"updatedAt"`
+	ID              string                  `json:"id"`
+	WorkspaceID     string                  `json:"workspaceId"`
+	Name            string                  `json:"name"`
+	Engine          Engine                  `json:"engine"`
+	Host            string                  `json:"host"`
+	Port            int                     `json:"port"`
+	Database        string                  `json:"database"`
+	Username        string                  `json:"username"`
+	PasswordCipher  string                  `json:"-"`
+	SSLMode         SSLMode                 `json:"sslMode"`
+	SSLCAPath       string                  `json:"sslCaPath"`
+	SSLCertPath     string                  `json:"sslCertPath"`
+	SSLKeyPath      string                  `json:"sslKeyPath"`
+	ProxyURL        string                  `json:"proxyUrl"`
+	ProxyUsername   string                  `json:"-"`
+	ProxyPassword   string                  `json:"-"`
+	SSHTunnel       SSHTunnel               `json:"sshTunnel"`
+	ReadOnly        bool                    `json:"readOnly"`
+	AutoReconnect   bool                    `json:"autoReconnect"`
+	MaxOpenConns    int                     `json:"maxOpenConns"`
+	MaxIdleConns    int                     `json:"maxIdleConns"`
+	ConnMaxLifetime int                     `json:"connMaxLifetimeSeconds"`
+	ConnMaxIdleTime int                     `json:"connMaxIdleTimeSeconds"`
+	RuntimeStatus   ConnectionRuntimeStatus `json:"-"`
+	Favorite        bool                    `json:"favorite"`
+	CreatedAt       time.Time               `json:"createdAt"`
+	UpdatedAt       time.Time               `json:"updatedAt"`
 }
 
 type SSHTunnel struct {

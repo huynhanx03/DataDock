@@ -1,26 +1,23 @@
+import { useState } from 'react'
 import {
+  AlertCircle,
   Braces,
   Copy,
   Database,
-  ExternalLink,
   FileCode2,
   Gauge,
   LockKeyhole,
-  MoreHorizontal,
   Network,
-  Play,
+  Rows3,
   ShieldCheck,
   Table2,
   X,
 } from 'lucide-react'
+import { writeClipboardText } from '@/shared/lib/clipboard'
 import { cn } from '@/shared/lib/cn'
 import {
   Badge,
   Button,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
   IconButton,
   Separator,
 } from '@/shared/ui'
@@ -29,38 +26,35 @@ import type { InspectorContext } from '@/widgets/app-shell/shell-types'
 type InspectorPaneProps = {
   context: InspectorContext
   onClose?: () => void
-  onOpenData: () => void
+  onOpenData?: () => void
   onNewQuery: () => void
+  onOpenSchema?: () => void
+  onGenerateSelect?: () => void
 }
 
-export function InspectorPane({ context, onClose, onOpenData, onNewQuery }: InspectorPaneProps) {
+export function InspectorPane({ context, onClose, onOpenData, onNewQuery, onOpenSchema, onGenerateSelect }: InspectorPaneProps) {
   const object = context.object
   const title = object?.name || context.connectionName
   const subtitle = object ? `${object.kind} in ${object.schema || object.database || context.connectionName}` : context.engine
+  const [copyError, setCopyError] = useState('')
+  const hasQuickActions = Boolean(object && (onOpenSchema || onGenerateSelect))
+
+  async function copyIdentifier() {
+    try {
+      await writeClipboardText(object?.qualifiedName || context.connectionName)
+      setCopyError('')
+    } catch (error) {
+      setCopyError(error instanceof Error ? error.message : 'The identifier could not be copied.')
+    }
+  }
 
   return (
     <aside className="flex h-full min-h-0 flex-col bg-surface/90" aria-label="Context inspector">
       <header className="flex h-[var(--toolbar-height)] shrink-0 items-center border-b border-border px-4">
         <span className="text-[length:var(--font-size-ui)] font-semibold text-foreground">Inspector</span>
-        <Badge variant="outline" className="ml-2 text-[length:var(--font-size-meta)]">Live</Badge>
+        <Badge variant={context.source === 'mock' ? 'accent' : 'success'} className="ml-2 text-[length:var(--font-size-meta)]">{context.source === 'mock' ? 'Demo' : 'Live'}</Badge>
         <div className="ml-auto flex items-center gap-0.5">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <IconButton label="Inspector actions" size="icon-xs">
-                <MoreHorizontal />
-              </IconButton>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem>
-                <Copy />
-                Copy identifier
-              </DropdownMenuItem>
-              <DropdownMenuItem>
-                <ExternalLink />
-                Open in new tab
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <IconButton label={`Copy ${object ? 'qualified name' : 'connection name'}`} size="icon-xs" onClick={() => void copyIdentifier()}><Copy /></IconButton>
           {onClose ? (
             <IconButton label="Close inspector" size="icon-xs" onClick={onClose}>
               <X />
@@ -68,6 +62,7 @@ export function InspectorPane({ context, onClose, onOpenData, onNewQuery }: Insp
           ) : null}
         </div>
       </header>
+      {copyError ? <div role="alert" className="flex shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-[length:var(--font-size-meta)] text-destructive"><AlertCircle className="size-3.5 shrink-0" /><span className="min-w-0 flex-1">{copyError}</span><Button size="xs" variant="ghost" onClick={() => setCopyError('')}>Dismiss</Button></div> : null}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5">
         <div className="flex items-start gap-3">
@@ -80,14 +75,14 @@ export function InspectorPane({ context, onClose, onOpenData, onNewQuery }: Insp
           </div>
         </div>
 
-        <div className="mt-5 grid grid-cols-2 gap-2">
-          <Button size="sm" onClick={onOpenData}>
+        <div className={cn('mt-5 grid gap-2', onOpenData ? 'grid-cols-2' : 'grid-cols-1')}>
+          {onOpenData ? <Button size="sm" onClick={onOpenData}>
             <Table2 />
             Open data
-          </Button>
+          </Button> : null}
           <Button size="sm" variant="outline" onClick={onNewQuery}>
             <Braces />
-            Query
+            New query
           </Button>
         </div>
 
@@ -113,7 +108,7 @@ export function InspectorPane({ context, onClose, onOpenData, onNewQuery }: Insp
             </div>
             <div className="flex items-center justify-between gap-4">
               <dt className="flex items-center gap-2 text-muted-foreground"><LockKeyhole className="size-3.5" />Transport</dt>
-              <dd className="font-medium text-foreground">Encrypted</dd>
+              <dd className="max-w-[150px] truncate font-medium text-foreground" title={context.transport}>{context.transport}</dd>
             </div>
           </dl>
         </section>
@@ -143,24 +138,7 @@ export function InspectorPane({ context, onClose, onOpenData, onNewQuery }: Insp
           </>
         ) : null}
 
-        <Separator className="my-5" />
-
-        <section className="rounded-xl border border-border bg-background/45 p-3.5">
-          <div className="flex items-center gap-2 text-[length:var(--font-size-ui)] font-semibold text-foreground">
-            <FileCode2 className="size-4 text-primary" />
-            Quick actions
-          </div>
-          <div className="mt-3 space-y-1">
-            <button type="button" onClick={onOpenData} className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-[length:var(--font-size-ui)] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground">
-              <Play className="size-3.5" />
-              Preview first 100 rows
-            </button>
-            <button type="button" className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-[length:var(--font-size-ui)] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground">
-              <FileCode2 className="size-3.5" />
-              Generate SELECT statement
-            </button>
-          </div>
-        </section>
+        {hasQuickActions ? <><Separator className="my-5" /><section className="rounded-xl border border-border bg-background/45 p-3.5"><div className="flex items-center gap-2 text-[length:var(--font-size-ui)] font-semibold text-foreground"><FileCode2 className="size-4 text-primary" />Object actions</div><div className="mt-3 space-y-1">{object && onOpenSchema ? <button type="button" onClick={onOpenSchema} className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-[length:var(--font-size-ui)] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"><Rows3 className="size-3.5" />Open structure and DDL</button> : null}{object && onGenerateSelect ? <button type="button" onClick={onGenerateSelect} className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-[length:var(--font-size-ui)] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"><FileCode2 className="size-3.5" />Generate SELECT statement</button> : null}</div></section></> : null}
       </div>
     </aside>
   )
